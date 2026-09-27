@@ -5,11 +5,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try { await Firebase.initializeApp(); } catch (_) {}
   final store = await Store.load();
+  await store.connectFirebase();
   runApp(DainPayApp(store: store));
 }
 
@@ -56,6 +58,9 @@ class Store extends ChangeNotifier {
   String permanentCode = '';
   Map<String, String> customerCodes = {};
   bool adminUnlocked = false;
+  bool firebaseReady = false;
+  bool syncing = false;
+  String firebaseUid = '';
 
   static Future<Store> load() async {
     final s = Store();
@@ -83,6 +88,121 @@ class Store extends ChangeNotifier {
     return s;
   }
 
+  Future<void> connectFirebase() async {
+    try {
+      User? user = FirebaseAuth.instance.currentUser;
+      user ??= (await FirebaseAuth.instance.signInAnonymously()).user;
+      if (user == null) return;
+      firebaseUid = user.uid;
+      firebaseReady = true;
+      await syncFromFirebase();
+    } catch (_) {
+      firebaseReady = false;
+    }
+    notifyListeners();
+  }
+
+  CollectionReference<Map<String, dynamic>> get _customersRef =>
+      FirebaseFirestore.instance.collection('users').doc(firebaseUid).collection('customers');
+
+  CollectionReference<Map<String, dynamic>> get _transactionsRef =>
+      FirebaseFirestore.instance.collection('users').doc(firebaseUid).collection('transactions');
+
+  Future<void> _pushCloud() async {
+    if (!firebaseReady || firebaseUid.isEmpty || syncing) return;
+    syncing = true;
+    try {
+      final batch = FirebaseFirestore.instance.batch();
+      for (final c in customers) {
+        batch.set(_customersRef.doc(c.id), c.toJson());
+      }
+      for (final t in transactions) {
+        batch.set(_transactionsRef.doc(t.id), {
+          ...t.toJson(),
+          'date': Timestamp.fromDate(t.date),
+        });
+      }
+      batch.set(
+        FirebaseFirestore.instance.collection('users').doc(firebaseUid),
+        {
+          'shopName': shopName,
+          'whatsappMessage': whatsappMessage,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+      await batch.commit();
+    } catch (_) {
+      // Offline mode remains usable.
+    } finally {
+      syncing = false;
+    }
+  }
+
+  Future<void> syncFromFirebase() async {
+    if (!firebaseReady || firebaseUid.isEmpty || syncing) return;
+    syncing = true;
+    try {
+      final customerSnap = await _customersRef.get();
+      final txSnap = await _transactionsRef.get();
+
+      for (final d in customerSnap.docs) {
+        final data = d.data();
+        final c = Customer(
+          data['id']?.toString() ?? d.id,
+          data['name']?.toString() ?? '',
+          data['phone']?.toString() ?? '',
+        );
+        final i = customers.indexWhere((x) => x.id == c.id);
+        if (i < 0) {
+          customers.add(c);
+        } else {
+          customers[i] = c;
+        }
+      }
+
+      for (final d in txSnap.docs) {
+        final data = d.data();
+        final rawDate = data['date'];
+        final date = rawDate is Timestamp
+            ? rawDate.toDate()
+            : DateTime.tryParse(rawDate?.toString() ?? '') ?? DateTime.now();
+        final t = Tx(
+          data['id']?.toString() ?? d.id,
+          data['customerId']?.toString() ?? '',
+          data['type']?.toString() ?? 'debt',
+          (data['amount'] as num?)?.toDouble() ?? 0,
+          date,
+          data['note']?.toString() ?? '',
+        );
+        final i = transactions.indexWhere((x) => x.id == t.id);
+        if (i < 0) {
+          transactions.add(t);
+        } else {
+          transactions[i] = t;
+        }
+      }
+
+      await _saveLocal();
+    } catch (_) {
+      // Offline mode remains usable.
+    } finally {
+      syncing = false;
+    }
+  }
+
+  Future<void> _saveLocal() async {
+    await prefs.setString('customers', jsonEncode(customers.map((x) => x.toJson()).toList()));
+    await prefs.setString('transactions', jsonEncode(transactions.map((x) => x.toJson()).toList()));
+    await prefs.setString('shopName', shopName);
+    await prefs.setString('whatsappMessage', whatsappMessage);
+    await prefs.setBool('dark', dark);
+    await prefs.setBool('activated', activated);
+    await prefs.setString('deviceCode', deviceCode);
+    await prefs.setString('permanentCode', permanentCode);
+    await prefs.setString('customerCodes', jsonEncode(customerCodes));
+  }
+
   int get trialDaysLeft {
     if (activated) return 999;
     final used = DateTime.now().difference(trialStart).inDays;
@@ -105,7 +225,7 @@ class Store extends ChangeNotifier {
     if (permanentCode.isNotEmpty) return permanentCode;
     permanentCode = 'DP-' + List.generate(12, (_) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Random().nextInt(32)]).join();
     await save();
-    try { await FirebaseFirestore.instance.collection('activation_codes').doc(permanentCode).set({'code': permanentCode, 'deviceCode': deviceCode, 'used': false, 'createdAt': FieldValue.serverTimestamp()}); } catch (_) {}
+    // Activation codes are issued from a trusted admin/backend, not by the customer app.
     return permanentCode;
   }
 
@@ -115,27 +235,14 @@ class Store extends ChangeNotifier {
     final code = 'DP-' + List.generate(12, (_) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Random().nextInt(32)]).join();
     customerCodes[customer.id] = code;
     await save();
-    try {
-      await FirebaseFirestore.instance.collection('activation_codes').doc(code).set({
-        'code': code, 'deviceCode': deviceCode, 'customerId': customer.id,
-        'customerName': customer.name, 'used': false, 'permanent': true,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-    } catch (_) {}
+    // Activation codes are issued from a trusted admin/backend, not by the customer app.
     return code;
   }
 
   Future<void> save() async {
-    await prefs.setString('customers', jsonEncode(customers.map((x) => x.toJson()).toList()));
-    await prefs.setString('transactions', jsonEncode(transactions.map((x) => x.toJson()).toList()));
-    await prefs.setString('shopName', shopName);
-    await prefs.setString('whatsappMessage', whatsappMessage);
-    await prefs.setBool('dark', dark);
-    await prefs.setBool('activated', activated);
-    await prefs.setString('deviceCode', deviceCode);
-    await prefs.setString('permanentCode', permanentCode);
-    await prefs.setString('customerCodes', jsonEncode(customerCodes));
+    await _saveLocal();
     notifyListeners();
+    await _pushCloud();
   }
 }
 
@@ -721,7 +828,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 leading: const Icon(Icons.cloud_outlined),
                 title: const Text('Firebase'),
                 subtitle: const Text(
-                  'حزم Firebase موجودة في المشروع. يلزم إضافة google-services.json وربط مشروع Firebase الفعلي.',
+                  store.firebaseReady ? 'متصل بـ Firebase • تتم مزامنة البيانات تلقائياً.' : 'Firebase غير متصل حالياً؛ التطبيق يعمل محلياً.',
                 ),
               ),
             ),

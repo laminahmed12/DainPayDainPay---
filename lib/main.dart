@@ -3,9 +3,12 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  try { await Firebase.initializeApp(); } catch (_) {}
   final store = await Store.load();
   runApp(DainPayApp(store: store));
 }
@@ -49,6 +52,9 @@ class Store extends ChangeNotifier {
   bool dark = false;
   bool activated = false;
   late DateTime trialStart;
+  String deviceCode = '';
+  String permanentCode = '';
+  bool adminUnlocked = false;
 
   static Future<Store> load() async {
     final s = Store();
@@ -57,6 +63,9 @@ class Store extends ChangeNotifier {
     s.whatsappMessage = s.prefs.getString('whatsappMessage') ?? s.whatsappMessage;
     s.dark = s.prefs.getBool('dark') ?? false;
     s.activated = s.prefs.getBool('activated') ?? false;
+    s.deviceCode = s.prefs.getString('deviceCode') ?? '';
+    s.permanentCode = s.prefs.getString('permanentCode') ?? '';
+    if (s.deviceCode.isEmpty) { s.deviceCode = 'DP-' + List.generate(8, (_) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Random().nextInt(36)]).join(); await s.prefs.setString('deviceCode', s.deviceCode); }
     final savedTrial = s.prefs.getString('trialStart');
     s.trialStart = savedTrial == null ? DateTime.now() : DateTime.parse(savedTrial);
     if (savedTrial == null) await s.prefs.setString('trialStart', s.trialStart.toIso8601String());
@@ -89,6 +98,14 @@ class Store extends ChangeNotifier {
     );
   }
 
+  Future<String> generatePermanentCode() async {
+    if (permanentCode.isNotEmpty) return permanentCode;
+    permanentCode = 'DP-' + List.generate(12, (_) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Random().nextInt(32)]).join();
+    await save();
+    try { await FirebaseFirestore.instance.collection('activation_codes').doc(permanentCode).set({'code': permanentCode, 'deviceCode': deviceCode, 'used': false, 'createdAt': FieldValue.serverTimestamp()}); } catch (_) {}
+    return permanentCode;
+  }
+
   Future<void> save() async {
     await prefs.setString('customers', jsonEncode(customers.map((x) => x.toJson()).toList()));
     await prefs.setString('transactions', jsonEncode(transactions.map((x) => x.toJson()).toList()));
@@ -96,6 +113,8 @@ class Store extends ChangeNotifier {
     await prefs.setString('whatsappMessage', whatsappMessage);
     await prefs.setBool('dark', dark);
     await prefs.setBool('activated', activated);
+    await prefs.setString('deviceCode', deviceCode);
+    await prefs.setString('permanentCode', permanentCode);
     notifyListeners();
   }
 }
@@ -154,7 +173,7 @@ class _HomePageState extends State<HomePage> {
       textDirection: TextDirection.rtl,
       child: Scaffold(
         appBar: AppBar(
-          title: Text(store.shopName, style: const TextStyle(fontWeight: FontWeight.w900)),
+          title: GestureDetector(onTap: () => _adminTap(context), child: Text(store.shopName, style: const TextStyle(fontWeight: FontWeight.w900))),
           actions: [
             IconButton(
               icon: const Icon(Icons.settings_outlined),
@@ -260,6 +279,74 @@ class _HomePageState extends State<HomePage> {
                 label: const Text('عميل جديد'),
               )
             : null,
+      ),
+    );
+  }
+}
+
+class AdminGate {
+  static int taps = 0;
+  static DateTime last = DateTime.fromMillisecondsSinceEpoch(0);
+}
+
+Future<void> _adminTap(BuildContext context) async {
+  final now = DateTime.now();
+  if (now.difference(AdminGate.last).inSeconds > 2) AdminGate.taps = 0;
+  AdminGate.last = now;
+  AdminGate.taps++;
+  if (AdminGate.taps < 3) return;
+  AdminGate.taps = 0;
+  final code = TextEditingController();
+  final ok = await showDialog<bool>(context: context, builder: (_) => Directionality(
+    textDirection: TextDirection.rtl,
+    child: AlertDialog(
+      title: const Text('Adreemk'),
+      content: TextField(controller: code, keyboardType: TextInputType.number, obscureText: true, decoration: const InputDecoration(labelText: 'رمز الدخول')),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('إلغاء')),
+        FilledButton(onPressed: () => Navigator.pop(context, code.text.trim() == '116936'), child: const Text('دخول')),
+      ],
+    ),
+  ));
+  if (ok == true && context.mounted) {
+    final store = context.findAncestorWidgetOfExactType<DainPayApp>()?.store;
+    if (store != null) Navigator.push(context, MaterialPageRoute(builder: (_) => AdreemkPage(store: store)));
+  }
+}
+
+class AdreemkPage extends StatelessWidget {
+  final Store store;
+  const AdreemkPage({super.key, required this.store});
+
+  @override
+  Widget build(BuildContext context) {
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Adreemk • إدارة التفعيل')),
+        body: ListView(
+          padding: const EdgeInsets.all(18),
+          children: [
+            Card(child: ListTile(
+              leading: const Icon(Icons.vpn_key_outlined),
+              title: const Text('رقم الجهاز'),
+              subtitle: Text(store.deviceCode),
+            )),
+            Card(child: ListTile(
+              leading: const Icon(Icons.generating_tokens_outlined),
+              title: const Text('توليد رمز العميل'),
+              subtitle: Text(store.permanentCode.isEmpty ? 'لم يتم توليد رمز لهذا الجهاز' : 'تم توليد رمز دائم لهذا الجهاز'),
+              onTap: () async {
+                final code = await store.generatePermanentCode();
+                if (context.mounted) showDialog(context: context, builder: (_) => AlertDialog(
+                  title: const Text('رمز التفعيل الدائم'),
+                  content: SelectableText(code, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('إغلاق'))],
+                ));
+              },
+            )),
+          ],
+        ),
       ),
     );
   }

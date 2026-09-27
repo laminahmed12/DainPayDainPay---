@@ -56,6 +56,9 @@ jobs:
           p.write_text(s)
           PY
 
+      - name: Fix Dart const compatibility
+        run: sed -i 's/subtitle: const Text(/subtitle: Text(/g' lib/main.dart
+
       - name: Get dependencies
         run: flutter pub get
 

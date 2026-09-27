@@ -173,7 +173,7 @@ class _HomePageState extends State<HomePage> {
       textDirection: TextDirection.rtl,
       child: Scaffold(
         appBar: AppBar(
-          title: GestureDetector(onTap: () => _adminTap(context), child: Text(store.shopName, style: const TextStyle(fontWeight: FontWeight.w900))),
+          title: GestureDetector(onTap: () => _adminTap(context, store), child: Text(store.shopName, style: const TextStyle(fontWeight: FontWeight.w900))),
           actions: [
             IconButton(
               icon: const Icon(Icons.settings_outlined),
@@ -184,9 +184,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
         ),
-        body: tab == 1
-            ? const AssociationsPage()
-            : Column(
+        body: Column(
                 children: [
                   if (!store.activated)
                     Container(
@@ -266,19 +264,16 @@ class _HomePageState extends State<HomePage> {
           onDestinationSelected: (v) => setState(() => tab = v),
           destinations: const [
             NavigationDestination(icon: Icon(Icons.menu_book_outlined), label: 'الدفتر'),
-            NavigationDestination(icon: Icon(Icons.groups_outlined), label: 'الجمعيات'),
           ],
         ),
-        floatingActionButton: tab == 0
-            ? FloatingActionButton.extended(
+        floatingActionButton: FloatingActionButton.extended(
                 onPressed: () => Navigator.push(
                   context,
                   MaterialPageRoute(builder: (_) => AddCustomerPage(store: store)),
                 ),
                 icon: const Icon(Icons.person_add),
                 label: const Text('عميل جديد'),
-              )
-            : null,
+              ),
       ),
     );
   }
@@ -289,7 +284,7 @@ class AdminGate {
   static DateTime last = DateTime.fromMillisecondsSinceEpoch(0);
 }
 
-Future<void> _adminTap(BuildContext context) async {
+Future<void> _adminTap(BuildContext context, Store store) async {
   final now = DateTime.now();
   if (now.difference(AdminGate.last).inSeconds > 2) AdminGate.taps = 0;
   AdminGate.last = now;
@@ -309,8 +304,7 @@ Future<void> _adminTap(BuildContext context) async {
     ),
   ));
   if (ok == true && context.mounted) {
-    final store = context.findAncestorWidgetOfExactType<DainPayApp>()?.store;
-    if (store != null) Navigator.push(context, MaterialPageRoute(builder: (_) => AdreemkPage(store: store)));
+    Navigator.push(context, MaterialPageRoute(builder: (_) => AdreemkPage(store: store)));
   }
 }
 

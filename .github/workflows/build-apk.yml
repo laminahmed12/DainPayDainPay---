@@ -22,6 +22,9 @@ jobs:
       - name: Generate Android platform
         run: flutter create . --platforms=android --org com.adreemk --project-name dainpay
 
+      - name: Set Android minimum SDK for Firebase
+        run: sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 23/' android/app/build.gradle
+
       - name: Get dependencies
         run: flutter pub get
 

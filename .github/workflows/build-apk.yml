@@ -57,7 +57,14 @@ jobs:
           PY
 
       - name: Fix Dart const compatibility
-        run: sed -i 's/subtitle: const Text(/subtitle: Text(/g' lib/main.dart
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("lib/main.dart")
+          s = p.read_text()
+          s = s.replace("subtitle: const Text(", "subtitle: Text(")
+          p.write_text(s)
+          PY
 
       - name: Get dependencies
         run: flutter pub get

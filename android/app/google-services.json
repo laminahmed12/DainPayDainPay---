@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "943598161426",
+    "project_id": "dainpay-a29fc",
+    "storage_bucket": "dainpay-a29fc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:943598161426:android:d75cf5887dacd84a0852cb",
+        "android_client_info": {
+          "package_name": "com.adreemk.dainpay"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCVGXbN2M_ud7vhawcJKtjJpSlS6XP7_z0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -54,6 +54,7 @@ class Store extends ChangeNotifier {
   late DateTime trialStart;
   String deviceCode = '';
   String permanentCode = '';
+  Map<String, String> customerCodes = {};
   bool adminUnlocked = false;
 
   static Future<Store> load() async {
@@ -65,6 +66,8 @@ class Store extends ChangeNotifier {
     s.activated = s.prefs.getBool('activated') ?? false;
     s.deviceCode = s.prefs.getString('deviceCode') ?? '';
     s.permanentCode = s.prefs.getString('permanentCode') ?? '';
+    final savedCodes = s.prefs.getString('customerCodes');
+    if (savedCodes != null) s.customerCodes = Map<String, String>.from(jsonDecode(savedCodes));
     if (s.deviceCode.isEmpty) { s.deviceCode = 'DP-' + List.generate(8, (_) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Random().nextInt(36)]).join(); await s.prefs.setString('deviceCode', s.deviceCode); }
     final savedTrial = s.prefs.getString('trialStart');
     s.trialStart = savedTrial == null ? DateTime.now() : DateTime.parse(savedTrial);
@@ -106,6 +109,22 @@ class Store extends ChangeNotifier {
     return permanentCode;
   }
 
+  Future<String> generateCustomerCode(Customer customer) async {
+    final existing = customerCodes[customer.id];
+    if (existing != null && existing.isNotEmpty) return existing;
+    final code = 'DP-' + List.generate(12, (_) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Random().nextInt(32)]).join();
+    customerCodes[customer.id] = code;
+    await save();
+    try {
+      await FirebaseFirestore.instance.collection('activation_codes').doc(code).set({
+        'code': code, 'deviceCode': deviceCode, 'customerId': customer.id,
+        'customerName': customer.name, 'used': false, 'permanent': true,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {}
+    return code;
+  }
+
   Future<void> save() async {
     await prefs.setString('customers', jsonEncode(customers.map((x) => x.toJson()).toList()));
     await prefs.setString('transactions', jsonEncode(transactions.map((x) => x.toJson()).toList()));
@@ -115,6 +134,7 @@ class Store extends ChangeNotifier {
     await prefs.setBool('activated', activated);
     await prefs.setString('deviceCode', deviceCode);
     await prefs.setString('permanentCode', permanentCode);
+    await prefs.setString('customerCodes', jsonEncode(customerCodes));
     notifyListeners();
   }
 }
@@ -322,30 +342,44 @@ class AdreemkPage extends StatelessWidget {
           padding: const EdgeInsets.all(18),
           children: [
             Card(child: ListTile(
-              leading: const Icon(Icons.vpn_key_outlined),
+              leading: const Icon(Icons.phone_android),
               title: const Text('رقم الجهاز'),
               subtitle: Text(store.deviceCode),
             )),
-            Card(child: ListTile(
-              leading: const Icon(Icons.generating_tokens_outlined),
-              title: const Text('توليد رمز العميل'),
-              subtitle: Text(store.permanentCode.isEmpty ? 'لم يتم توليد رمز لهذا الجهاز' : 'تم توليد رمز دائم لهذا الجهاز'),
-              onTap: () async {
-                final code = await store.generatePermanentCode();
-                if (context.mounted) showDialog(context: context, builder: (_) => AlertDialog(
-                  title: const Text('رمز التفعيل الدائم'),
-                  content: SelectableText(code, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                  actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('إغلاق'))],
-                ));
-              },
-            )),
+            const SizedBox(height: 8),
+            const Text('رموز العملاء', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            if (store.customers.isEmpty)
+              const Card(child: Padding(
+                padding: EdgeInsets.all(18),
+                child: Text('أضف العملاء أولاً، ثم يمكنك توليد رمز دائم لكل عميل.'),
+              ))
+            else
+              ...store.customers.map((customer) => Card(
+                child: ListTile(
+                  leading: const CircleAvatar(child: Icon(Icons.person_outline)),
+                  title: Text(customer.name),
+                  subtitle: Text(store.customerCodes[customer.id] ?? 'لم يتم توليد رمز بعد'),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.vpn_key_outlined),
+                    onPressed: () async {
+                      final code = await store.generateCustomerCode(customer);
+                      if (!context.mounted) return;
+                      showDialog(context: context, builder: (_) => AlertDialog(
+                        title: Text('رمز العميل: ' + customer.name),
+                        content: SelectableText(code, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('إغلاق'))],
+                      ));
+                    },
+                  ),
+                ),
+              )),
           ],
         ),
       ),
     );
   }
 }
-
 class EmptyView extends StatelessWidget {
   final VoidCallback onAdd;
   const EmptyView({super.key, required this.onAdd});

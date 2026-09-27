@@ -22,6 +22,27 @@ jobs:
       - name: Generate Android platform
         run: flutter create . --platforms=android --org com.adreemk --project-name dainpay
 
+      - name: Install Firebase Android configuration
+        run: |
+          test -f android/app/google-services.json
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/settings.gradle")
+          s = p.read_text()
+          marker = 'id "org.jetbrains.kotlin.android" version'
+          lines = s.splitlines()
+          if not any("com.google.gms.google-services" in x for x in lines):
+              idx = next(i for i,x in enumerate(lines) if marker in x)
+              lines.insert(idx + 1, '    id "com.google.gms.google-services" version "4.5.0" apply false')
+          p.write_text("\n".join(lines) + "\n")
+
+          p = Path("android/app/build.gradle")
+          s = p.read_text()
+          if 'id "com.google.gms.google-services"' not in s:
+              s = s.replace('id "dev.flutter.flutter-gradle-plugin"', 'id "dev.flutter.flutter-gradle-plugin"\n    id "com.google.gms.google-services"')
+          p.write_text(s)
+          PY
+
       - name: Set Android minimum SDK for Firebase
         run: sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 23/' android/app/build.gradle
 
@@ -37,6 +58,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DainPay-release
+          name: DainPay-Firebase-release
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error

@@ -46,6 +46,16 @@ jobs:
       - name: Set Android minimum SDK for Firebase
         run: sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 23/' android/app/build.gradle
 
+      - name: Fix generated Dart const issue
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("lib/main.dart")
+          s = p.read_text()
+          s = s.replace("subtitle: const Text(\\n                  store.firebaseReady", "subtitle: Text(\\n                  store.firebaseReady")
+          p.write_text(s)
+          PY
+
       - name: Get dependencies
         run: flutter pub get
 

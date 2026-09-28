@@ -25,23 +25,36 @@ jobs:
           flutter-version: "3.24.5"
           channel: stable
           cache: true
-      - name: Prepare Android, Firebase and source fixes
+      - name: Prepare Android project and app icon
+        shell: bash
         run: |
           rm -rf android
           flutter create --platforms=android --org com.adreemk --project-name dainpay .
           python3 - <<'PY'
           from pathlib import Path
+          build = Path('android/app/build.gradle')
+          s = build.read_text()
+          s = s.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 35')
+          s = s.replace('compileSdk flutter.compileSdkVersion', 'compileSdk 35')
+          s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 23')
+          s = s.replace('minSdk flutter.minSdkVersion', 'minSdk 23')
+          s = s.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 23')
+          if 'compileSdk = 35' not in s and 'compileSdk 35' not in s:
+              s = s.replace('android {', 'android {\n    compileSdk 35', 1)
+          if 'minSdk 23' not in s and 'minSdk = 23' not in s and 'minSdkVersion 23' not in s:
+              s = s.replace('defaultConfig {', 'defaultConfig {\n        minSdk 23', 1)
+          build.write_text(s)
           p = Path('lib/main.dart')
           s = p.read_text()
           firebase = "await Firebase.initializeApp(options: const FirebaseOptions(apiKey: 'AIzaSyCVGXbN2M_ud7vhawcJKtjJpSlS6XP7_z0', appId: '1:943598161426:android:d75cf5887dacd84a0852cb', messagingSenderId: '943598161426', projectId: 'dainpay-a29fc', storageBucket: 'dainpay-a29fc.firebasestorage.app'));"
           s = s.replace('await Firebase.initializeApp();', firebase, 1)
-          s = s.replace("\n    );\n  }\n}\n", "\n    ));\n  }\n}\n")
-          s = s.replace("]))); }\n}", "]]))); }\n}")
           p.write_text(s)
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           ms = manifest.read_text().replace('@mipmap/ic_launcher', '@drawable/dainpay_icon')
           manifest.write_text(ms)
-          Path('android/app/src/main/res/drawable/dainpay_icon.xml').write_text('''<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108"><path android:fillColor="#0F5C6E" android:pathData="M54,4A50,50 0,1 0,54 104A50,50 0,1 0,54 4"/><path android:fillColor="#E8A317" android:pathData="M30,35L78,35L78,45L30,45Z"/><path android:fillColor="#E8A317" android:pathData="M38,50L70,50L70,60L38,60Z"/><path android:fillColor="#E8A317" android:pathData="M30,65L78,65L78,75L30,75Z"/></vector>''')
+          icon = Path('android/app/src/main/res/drawable/dainpay_icon.xml')
+          icon.parent.mkdir(parents=True, exist_ok=True)
+          icon.write_text('''<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108"><path android:fillColor="#0F5C6E" android:pathData="M54,4A50,50 0,1 0,54 104A50,50 0,1 0,54 4"/><path android:fillColor="#E8A317" android:pathData="M30,35L78,35L78,45L30,45Z"/><path android:fillColor="#E8A317" android:pathData="M38,50L70,50L70,60L38,60Z"/><path android:fillColor="#E8A317" android:pathData="M30,65L78,65L78,75L30,75Z"/></vector>''')
           PY
       - name: Get dependencies
         run: flutter pub get

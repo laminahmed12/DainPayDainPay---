@@ -40,10 +40,11 @@ jobs:
         run: python3 tool/fix_trial_step1.py
       - name: Parse gate
         run: |
-          echo "--- main.dart around transformed transaction screens ---"
-          nl -ba lib/main.dart | sed -n '40,75p'
-          echo "--- main.dart around admin screens ---"
-          nl -ba lib/main.dart | sed -n '95,190p'
+          echo "--- Step 1 source verification ---"
+          grep -q "const Duration(days:10)" lib/main.dart
+          grep -q "collection('trial_devices')" lib/main.dart
+          grep -q "device_info_plus/device_info_plus.dart" lib/main.dart
+          echo "STEP1_SOURCE_CHECK_OK"
           dart format --output=none lib/main.dart
       - name: Analyze
         run: flutter analyze lib --no-fatal-infos --no-fatal-warnings

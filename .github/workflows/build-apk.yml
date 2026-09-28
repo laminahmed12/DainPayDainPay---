@@ -38,6 +38,13 @@ jobs:
         run: python3 tool/fix_source_integrity_step1.py
       - name: Apply and verify Step 1 - 10 day trial
         run: python3 tool/fix_trial_step1.py
+      - name: Parse gate
+        run: |
+          echo "--- main.dart around transformed transaction screens ---"
+          nl -ba lib/main.dart | sed -n '40,75p'
+          echo "--- main.dart around admin screens ---"
+          nl -ba lib/main.dart | sed -n '95,190p'
+          dart format --output=none lib/main.dart
       - name: Analyze
         run: flutter analyze lib --no-fatal-infos --no-fatal-warnings
       - name: Build release APK

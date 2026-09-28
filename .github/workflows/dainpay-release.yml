@@ -28,6 +28,46 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Generate Android host project
+        shell: bash
+        run: |
+          cp android/app/google-services.json /tmp/google-services.json
+          flutter create . --platforms=android --org com.adreemk --project-name dainpay
+          mkdir -p android/app
+          cp /tmp/google-services.json android/app/google-services.json
+
+      - name: Configure Firebase Android plugin
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('android/settings.gradle')
+          if p.exists():
+              s = p.read_text()
+              needle = 'id "org.jetbrains.kotlin.android" version "1.8.22" apply false'
+              if needle in s and 'com.google.gms.google-services' not in s:
+                  s = s.replace(needle, needle + '\n    id "com.google.gms.google-services" version "4.4.2" apply false')
+              p.write_text(s)
+          p = Path('android/settings.gradle.kts')
+          if p.exists():
+              s = p.read_text()
+              needle = 'id("org.jetbrains.kotlin.android") version "1.9.22" apply false'
+              if needle in s and 'com.google.gms.google-services' not in s:
+                  s = s.replace(needle, needle + '\n    id("com.google.gms.google-services") version "4.4.2" apply false')
+              p.write_text(s)
+          for name in ['android/app/build.gradle','android/app/build.gradle.kts']:
+              p = Path(name)
+              if p.exists():
+                  s = p.read_text()
+                  if 'com.google.gms.google-services' not in s:
+                      if 'plugins {' in s:
+                          if name.endswith('.kts'):
+                              s = s.replace('plugins {', 'plugins {\n    id("com.google.gms.google-services")', 1)
+                          else:
+                              s = s.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services"', 1)
+                  p.write_text(s)
+          PY
+
       - name: Get dependencies
         run: flutter pub get
 

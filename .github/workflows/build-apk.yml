@@ -24,8 +24,7 @@ jobs:
           test -f android/app/google-services.json
           python3 - <<'PY'
           from pathlib import Path
-          p=Path("android/settings.gradle")
-          s=p.read_text(); lines=s.splitlines()
+          p=Path("android/settings.gradle"); s=p.read_text(); lines=s.splitlines()
           if not any("com.google.gms.google-services" in x for x in lines):
               idx=next(i for i,x in enumerate(lines) if 'id "org.jetbrains.kotlin.android" version' in x)
               lines.insert(idx+1,'    id "com.google.gms.google-services" version "4.5.0" apply false')
@@ -35,7 +34,7 @@ jobs:
           s=s.replace('minSdk = flutter.minSdkVersion','minSdk = 23'); p.write_text(s)
           PY
       - name: Repair DainPay source
-        run: python3 tool/repair_source.py
+        run: python3 tool/repair_source_v2.py
       - name: Get dependencies
         run: flutter pub get
       - name: Analyze

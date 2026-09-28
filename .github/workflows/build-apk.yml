@@ -18,7 +18,7 @@ jobs:
       - name: Generate Android platform
         run: flutter create . --platforms=android --org com.adreemk --project-name dainpay
       - name: Rewrite DainPay clean source
-        run: python3 tool/rewrite_main_v3.py
+        run: python3 tool/rewrite_main_v4.py
       - name: Configure Firebase Android plugin
         run: |
           python3 - <<'PY'

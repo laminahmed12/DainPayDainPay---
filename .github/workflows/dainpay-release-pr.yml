@@ -31,17 +31,18 @@ jobs:
           flutter create --platforms=android --org com.adreemk --project-name dainpay .
           python3 - <<'PY'
           from pathlib import Path
-          p=Path('lib/main.dart')
-          s=p.read_text()
-          old="try { await Firebase.initializeApp(); } catch (_) {}"
-          new="try { await Firebase.initializeApp(options: const FirebaseOptions(apiKey: 'AIzaSyCVGXbN2M_ud7vhawcJKtjJpSlS6XP7_z0', appId: '1:943598161426:android:d75cf5887dacd84a0852cb', messagingSenderId: '943598161426', projectId: 'dainpay-a29fc', storageBucket: 'dainpay-a29fc.firebasestorage.app')); } catch (_) {}"
-          if old not in s: raise SystemExit('Firebase initialization marker not found')
-          p.write_text(s.replace(old,new,1))
-          manifest=Path('android/app/src/main/AndroidManifest.xml')
-          ms=manifest.read_text()
-          ms=ms.replace('@mipmap/ic_launcher','@drawable/dainpay_icon')
+          p = Path('lib/main.dart')
+          s = p.read_text()
+          old = 'await Firebase.initializeApp();'
+          new = "await Firebase.initializeApp(options: const FirebaseOptions(apiKey: 'AIzaSyCVGXbN2M_ud7vhawcJKtjJpSlS6XP7_z0', appId: '1:943598161426:android:d75cf5887dacd84a0852cb', messagingSenderId: '943598161426', projectId: 'dainpay-a29fc', storageBucket: 'dainpay-a29fc.firebasestorage.app'));"
+          if old not in s:
+              raise SystemExit('Firebase initialization call not found')
+          p.write_text(s.replace(old, new, 1))
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          ms = manifest.read_text()
+          ms = ms.replace('@mipmap/ic_launcher', '@drawable/dainpay_icon')
           manifest.write_text(ms)
-          icon=Path('android/app/src/main/res/drawable/dainpay_icon.xml')
+          icon = Path('android/app/src/main/res/drawable/dainpay_icon.xml')
           icon.write_text('''<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108"><path android:fillColor="#0F5C6E" android:pathData="M54,4A50,50 0,1 0,54 104A50,50 0,1 0,54 4"/><path android:fillColor="#E8A317" android:pathData="M30,35L78,35L78,45L30,45Z"/><path android:fillColor="#E8A317" android:pathData="M38,50L70,50L70,60L38,60Z"/><path android:fillColor="#E8A317" android:pathData="M30,65L78,65L78,75L30,75Z"/></vector>''')
           PY
       - name: Get dependencies

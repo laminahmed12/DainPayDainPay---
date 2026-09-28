@@ -35,7 +35,6 @@ jobs:
               idx = next(i for i,x in enumerate(lines) if marker in x)
               lines.insert(idx + 1, '    id "com.google.gms.google-services" version "4.5.0" apply false')
           p.write_text("\n".join(lines) + "\n")
-
           p = Path("android/app/build.gradle")
           s = p.read_text()
           if 'id "com.google.gms.google-services"' not in s:
@@ -65,6 +64,12 @@ jobs:
           s = s.replace("subtitle: const Text(", "subtitle: Text(")
           p.write_text(s)
           PY
+
+      - name: Apply DainPay functional fixes
+        run: python3 tool/fix_release.py
+
+      - name: Apply 10-day trial and hidden Adreemk owner panel
+        run: python3 tool/owner_trial_patch.py
 
       - name: Get dependencies
         run: flutter pub get

@@ -24,6 +24,8 @@ jobs:
           cache: true
       - name: Generate Android project
         run: flutter create --platforms=android --org com.adreemk --project-name dainpay .
+      - name: Rewrite DainPay clean source
+        run: python3 tool/rewrite_main_v3.py
       - name: Prepare Android
         run: |
           python3 - <<'PY'
@@ -35,8 +37,6 @@ jobs:
           manifest.write_text(ms)
           icon=Path('android/app/src/main/res/drawable/dainpay_icon.xml'); icon.parent.mkdir(parents=True,exist_ok=True); icon.write_text('''<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108"><path android:fillColor="#0F5C6E" android:pathData="M54,4A50,50 0,1 0,54 104A50,50 0,1 0,54 4"/><path android:fillColor="#E8A317" android:pathData="M30,35L78,35L78,45L30,45Z"/><path android:fillColor="#E8A317" android:pathData="M38,50L70,50L70,60L38,60Z"/><path android:fillColor="#E8A317" android:pathData="M30,65L78,65L78,75L30,75Z"/></vector>''')
           PY
-      - name: Verify source
-        run: test -s lib/main.dart
       - name: Get dependencies
         run: flutter pub get
       - name: Analyze

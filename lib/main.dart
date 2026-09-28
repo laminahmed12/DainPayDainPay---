@@ -1,10 +1,13 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -62,8 +65,9 @@ class Tx {
   double amount;
   DateTime date;
   String note;
+  String receiptPath;
 
-  Tx(this.id, this.customerId, this.type, this.amount, this.date, this.note);
+  Tx(this.id, this.customerId, this.type, this.amount, this.date, this.note, [this.receiptPath = '']);
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -72,6 +76,7 @@ class Tx {
         'amount': amount,
         'date': date.toIso8601String(),
         'note': note,
+        'receiptPath': receiptPath,
       };
 
   factory Tx.fromJson(dynamic j) => Tx(
@@ -81,6 +86,7 @@ class Tx {
         (j['amount'] as num).toDouble(),
         DateTime.tryParse(j['date'].toString()) ?? DateTime.now(),
         j['note']?.toString() ?? '',
+        j['receiptPath']?.toString() ?? '',
       );
 }
 
@@ -137,9 +143,9 @@ class Store extends ChangeNotifier {
       firebaseUid = user.uid;
       firebaseReady = true;
       await syncFromFirebase();
-    } catch (_) {
-      firebaseReady = false;
-    }
+  } catch (_) {
+    firebaseReady = false;
+  }
     notifyListeners();
   }
 
@@ -193,6 +199,7 @@ class Store extends ChangeNotifier {
           (data['amount'] as num?)?.toDouble() ?? 0,
           date,
           data['note']?.toString() ?? '',
+          data['receiptPath']?.toString() ?? '',
         );
 
         final index = transactions.indexWhere((x) => x.id == t.id);
@@ -339,9 +346,9 @@ class DainPayApp extends StatelessWidget {
   const DainPayApp({super.key, required this.store});
 
   @override
+  @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: store,
       builder: (_, __) => MaterialApp(
         debugShowCheckedModeBanner: false,
         themeMode: store.dark ? ThemeMode.dark : ThemeMode.light,
@@ -744,8 +751,8 @@ class EmptyView extends StatelessWidget {
         ],
       ),
     );
-  }
 }
+
 
 class AddCustomerPage extends StatefulWidget {
   final Store store;
@@ -883,8 +890,8 @@ class CustomerPage extends StatelessWidget {
 
     return Directionality(
       textDirection: TextDirection.rtl,
-      child: Scaffold(
-        appBar: AppBar(
+        child: Scaffold(
+          appBar: AppBar(
           title: Text(customer.name),
           actions: [
             IconButton(
@@ -976,14 +983,32 @@ class CustomerPage extends StatelessWidget {
                       dateText(tx.date) +
                           (tx.note.isEmpty ? '' : ' • ' + tx.note),
                     ),
-                    trailing: Text(
-                      money(tx.amount),
-                      style: TextStyle(
-                        fontWeight: FontWeight.w900,
-                        color: tx.type == 'debt'
-                            ? Theme.of(context).colorScheme.primary
-                            : Colors.green,
-                      ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (tx.receiptPath.isNotEmpty &&
+                            File(tx.receiptPath).existsSync())
+                          IconButton(
+                            tooltip: 'عرض الإيصال',
+                            icon: const Icon(Icons.receipt_long_outlined),
+                            onPressed: () => Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) =>
+                                    ReceiptPreviewPage(path: tx.receiptPath),
+                              ),
+                            ),
+                          ),
+                        Text(
+                          money(tx.amount),
+                          style: TextStyle(
+                            fontWeight: FontWeight.w900,
+                            color: tx.type == 'debt'
+                                ? Theme.of(context).colorScheme.primary
+                                : Colors.green,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -1001,7 +1026,29 @@ class CustomerPage extends StatelessWidget {
             ),
           ),
           icon: const Icon(Icons.add),
-          label: const Text('عملية'),
+          label: const Text('إضافة عملية'),
+        ),
+      );
+    }
+  }
+}
+
+class ReceiptPreviewPage extends StatelessWidget {
+  final String path;
+  const ReceiptPreviewPage({super.key, required this.path});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('صورة الإيصال')),
+      body: Center(
+        child: InteractiveViewer(
+          child: Image.file(
+            File(path),
+            fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) =>
+                const Text('تعذر فتح صورة الإيصال'),
+          ),
         ),
       ),
     );
@@ -1057,7 +1104,56 @@ class AddTransactionPage extends StatefulWidget {
 class _AddTransactionPageState extends State<AddTransactionPage> {
   final amount = TextEditingController();
   final note = TextEditingController();
+  final ImagePicker picker = ImagePicker();
   String type = 'debt';
+  String receiptPath = '';
+
+  Future<void> pickReceipt() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt_outlined),
+              title: const Text('التقاط صورة بالكاميرا'),
+              onTap: () => Navigator.pop(context, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('اختيار من المعرض'),
+              onTap: () => Navigator.pop(context, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (source == null) return;
+    try {
+      final image = await picker.pickImage(
+        source: source,
+        imageQuality: 75,
+        maxWidth: 1600,
+        maxHeight: 2200,
+      );
+      if (image == null) return;
+      final dir = await getApplicationDocumentsDirectory();
+      final receiptDir = Directory(dir.path + '/receipts');
+      await receiptDir.create(recursive: true);
+      final target = receiptDir.path + '/receipt_' +
+          DateTime.now().microsecondsSinceEpoch.toString() + '.jpg';
+      final saved = await File(image.path).copy(target);
+      if (!mounted) return;
+      setState(() => receiptPath = saved.path);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر حفظ صورة الإيصال')),
+        );
+      }
+    }
+  }
 
   Future<void> save() async {
     final value = double.tryParse(amount.text.replaceAll(',', '.'));
@@ -1102,6 +1198,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
         value,
         DateTime.now(),
         note.text.trim(),
+        receiptPath,
       ),
     );
 
@@ -1156,6 +1253,44 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
           controller: note,
           maxLines: 3,
           decoration: const InputDecoration(labelText: 'ملاحظات'),
+        ),
+        const SizedBox(height: 16),
+        Card(
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.receipt_long_outlined),
+                title: const Text('صورة الإيصال'),
+                subtitle: Text(
+                  receiptPath.isEmpty
+                      ? 'اختياري — يمكنك حفظ العملية بدون صورة'
+                      : 'تم إرفاق صورة الإيصال',
+                ),
+                trailing: IconButton(
+                  tooltip: 'إرفاق إيصال',
+                  icon: const Icon(Icons.add_a_photo_outlined),
+                  onPressed: pickReceipt,
+                ),
+              ),
+              if (receiptPath.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.file(
+                      File(receiptPath),
+                      height: 180,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => const SizedBox(
+                        height: 80,
+                        child: Center(child: Text('تعذر عرض الصورة')),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
         const SizedBox(height: 20),
         FilledButton(
@@ -1241,10 +1376,10 @@ class ReportPage extends StatelessWidget {
           ],
         ),
       ),
+      ),
     );
   }
 }
-
 class SettingsPage extends StatefulWidget {
   final Store store;
 
@@ -1255,14 +1390,9 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  late TextEditingController shop;
-  late TextEditingController message;
+  final shop = TextEditingController();
+  final message = TextEditingController();
 
-  @override
-  void initState() {
-    super.initState();
-    shop = TextEditingController(text: widget.store.shopName);
-    message = TextEditingController(text: widget.store.whatsappMessage);
   }
 
   Future<void> save() async {
@@ -1306,10 +1436,10 @@ class _SettingsPageState extends State<SettingsPage> {
             SwitchListTile(
               title: const Text('الوضع الداكن'),
               value: store.dark,
-              onChanged: (v) async {
-                store.dark = v;
-                await store.save();
-              },
+               onChanged: (value) async {
+                 store.dark = value;
+                 await store.save();
+               },
             ),
             const Divider(height: 30),
             const Text(
@@ -1355,9 +1485,9 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
               ),
             ),
-          ],
-        ),
-      ),
+     );
+   }
+ }
     );
   }
 }

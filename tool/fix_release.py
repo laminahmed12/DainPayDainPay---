@@ -32,7 +32,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
   final amount = TextEditingController(), note = TextEditingController(), voice = TextEditingController();
   final picker = ImagePicker();
   final speech = stt.SpeechToText();
-  String type = 'debt', receiptPath = '', receiptUrl = '';
+  String type = 'debt', receiptPath = '';
   bool listening = false;
 
   Future<void> voiceInput() async {
@@ -62,7 +62,7 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
       final f = await File(image.path).copy('${rd.path}/receipt_${DateTime.now().microsecondsSinceEpoch}.jpg');
       receiptPath = f.path;
       if (widget.store.firebaseReady) {
-        try { final ref = FirebaseStorage.instance.ref('users/${widget.store.uid}/receipts/${f.uri.pathSegments.last}'); await ref.putFile(f); receiptUrl = await ref.getDownloadURL(); } catch (_) {}
+        try { final ref = FirebaseStorage.instance.ref('users/${widget.store.uid}/receipts/${f.uri.pathSegments.last}'); await ref.putFile(f); } catch (_) {}
       }
       if (mounted) setState(() {});
     } catch (_) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر حفظ الإيصال'))); }
@@ -74,12 +74,12 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     if (type == 'debt' && widget.customer.limit > 0) {
       final current = widget.store.balance(widget.customer.id);
       if (current + a > widget.customer.limit) {
-        final available = max(0, widget.customer.limit - current);
+        final available = max(0, widget.customer.limit - current).toDouble();
         await showDialog(context: context, builder: (_) => AlertDialog(title: const Text('تجاوز السقف الائتماني'), content: Text('لا يمكن تسجيل الدين. السقف ${money(widget.customer.limit)} والمتاح ${money(available)}.'), actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('حسنًا'))]));
         return;
       }
     }
-    widget.store.transactions.add(Tx(id: makeId(), customerId: widget.customer.id, type: type, amount: a, date: DateTime.now(), note: note.text.trim(), receiptPath: receiptPath, receiptUrl: receiptUrl));
+    widget.store.transactions.add(Tx(id: makeId(), customerId: widget.customer.id, type: type, amount: a, date: DateTime.now(), note: note.text.trim(), receiptPath: receiptPath));
     await widget.store.save(); if (mounted) Navigator.pop(context);
   }
 

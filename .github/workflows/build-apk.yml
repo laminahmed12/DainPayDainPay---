@@ -38,6 +38,8 @@ jobs:
         run: python3 tool/fix_source_integrity_step1.py
       - name: Apply and verify Step 1 - 10 day trial
         run: python3 tool/fix_trial_step1.py
+      - name: Repair source syntax for Step 1
+        run: python3 tool/fix_parse_step1.py
       - name: Parse gate
         run: |
           echo "--- Step 1 source verification ---"

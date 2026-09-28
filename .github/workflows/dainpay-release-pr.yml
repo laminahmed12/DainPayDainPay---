@@ -35,12 +35,8 @@ jobs:
           s = p.read_text()
           firebase = "await Firebase.initializeApp(options: const FirebaseOptions(apiKey: 'AIzaSyCVGXbN2M_ud7vhawcJKtjJpSlS6XP7_z0', appId: '1:943598161426:android:d75cf5887dacd84a0852cb', messagingSenderId: '943598161426', projectId: 'dainpay-a29fc', storageBucket: 'dainpay-a29fc.firebasestorage.app'));"
           s = s.replace('await Firebase.initializeApp();', firebase, 1)
-          s = s.replace("label: const Text('عميل')),\n    );", "label: const Text('عميل')),\n    ));")
-          s = s.replace("label: const Text('عملية')),\n    );", "label: const Text('عملية')),\n    ));")
-          s = s.replace("FilledButton(onPressed: save, child: const Text('حفظ'))])); }", "FilledButton(onPressed: save, child: const Text('حفظ'))])); }".replace('])));', '])));'))
-          s = s.replace("FilledButton(onPressed: save, child: const Text('حفظ العملية'))])); }", "FilledButton(onPressed: save, child: const Text('حفظ العملية'))])); }")
-          # The Directionality wrappers in the compact pages need one final closing parenthesis.
-          s = s.replace("const Text('حفظ'))]));\n}", "const Text('حفظ'))]));\n}")
+          s = s.replace("\n    );\n  }\n}\n", "\n    ));\n  }\n}\n")
+          s = s.replace("]))); }\n}", "]]))); }\n}")
           p.write_text(s)
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           ms = manifest.read_text().replace('@mipmap/ic_launcher', '@drawable/dainpay_icon')

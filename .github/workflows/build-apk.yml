@@ -34,6 +34,8 @@ jobs:
           PY
       - name: Get dependencies
         run: flutter pub get
+      - name: Apply source integrity prerequisite
+        run: python3 tool/fix_source_integrity_step1.py
       - name: Apply and verify Step 1 - 10 day trial
         run: python3 tool/fix_trial_step1.py
       - name: Analyze

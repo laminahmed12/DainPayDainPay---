@@ -1,0 +1,1 @@
+Release candidate build should validate formatting, analysis, and APK.

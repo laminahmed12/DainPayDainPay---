@@ -1,0 +1,1 @@
+DainPay 1.4.0 release candidate: removed PDF and receipt-photo features; added text account statement and payment receipt via WhatsApp; added reviewed voice drafts; simplified dependencies.

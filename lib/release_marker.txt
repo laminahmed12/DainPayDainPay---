@@ -1,0 +1,1 @@
+DainPay release-final work in progress. PDF and receipt-photo features are intentionally removed; receipt is a generated WhatsApp text message after payment.

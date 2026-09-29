@@ -34,6 +34,25 @@ jobs:
           PY
       - name: Get dependencies
         run: flutter pub get
+      - name: Verify and repair known source closings
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('lib/main.dart')
+          s=p.read_text()
+          replacements={
+            "])));}}\nclass CustomerPage": "])));}\nclass CustomerPage",
+            "])));}}\nclass SettingsPage": "])));}\nclass SettingsPage",
+            "])));}}\nclass ActivationPage": "])));}\nclass ActivationPage",
+            "]));}}\nclass AddTransactionPage": "]));}\nclass AddTransactionPage",
+            "]));}}\nclass _AdminGateState": "]));}\nclass _AdminGateState",
+            "]));}}\nclass _AdminPageState": "]));}\nclass _AdminPageState",
+          }
+          for old,new in replacements.items():
+              s=s.replace(old,new)
+          p.write_text(s)
+          PY
+          dart format --output=none lib/main.dart
       - name: Apply source integrity prerequisite
         run: python3 tool/fix_source_integrity_step1.py
       - name: Apply and verify Step 1 - 10 day trial

@@ -29,24 +29,22 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           s = manifest.read_text()
-          permissions = [
+          root = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
+          for permission in [
               '    <uses-permission android:name="android.permission.RECORD_AUDIO" />',
               '    <uses-permission android:name="android.permission.CAMERA" />',
-          ]
-          for permission in permissions:
+          ]:
               if permission not in s:
-                  s = s.replace('<manifest xmlns:android="http://schemas.android.com/apk/res/android">', '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n' + permission, 1)
+                  s = s.replace(root, root + '\n' + permission, 1)
           manifest.write_text(s)
 
           p = Path('android/settings.gradle')
           s = p.read_text()
           if 'com.google.gms.google-services' not in s:
-              marker = 'id "org.jetbrains.kotlin.android" version'
               lines = s.splitlines()
-              idx = next((i for i, line in enumerate(lines) if marker in line), None)
+              idx = next((i for i, line in enumerate(lines) if 'id "org.jetbrains.kotlin.android" version' in line), None)
               if idx is not None:
                   lines.insert(idx + 1, '    id "com.google.gms.google-services" version "4.4.2" apply false')
               p.write_text('\n'.join(lines) + '\n')
@@ -54,10 +52,7 @@ jobs:
           p = Path('android/app/build.gradle')
           s = p.read_text()
           if 'id "com.google.gms.google-services"' not in s:
-              s = s.replace(
-                  'id "dev.flutter.flutter-gradle-plugin"',
-                  'id "dev.flutter.flutter-gradle-plugin"\n    id "com.google.gms.google-services"'
-              )
+              s = s.replace('id "dev.flutter.flutter-gradle-plugin"', 'id "dev.flutter.flutter-gradle-plugin"\n    id "com.google.gms.google-services"')
           s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 23')
           p.write_text(s)
           PY

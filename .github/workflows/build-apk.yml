@@ -25,12 +25,6 @@ jobs:
       - name: Prepare Android platform
         run: flutter create . --platforms=android --org com.adreemk --project-name dainpay
 
-      - name: Prepare Arabic PDF font
-        run: |
-          mkdir -p assets/fonts
-          cp /usr/share/fonts/truetype/noto/NotoSansArabicUI-Regular.ttf assets/fonts/NotoSansArabicUI-Regular.ttf
-          test -s assets/fonts/NotoSansArabicUI-Regular.ttf
-
       - name: Configure Android permissions and Firebase plugin
         run: |
           python3 - <<'PY'
@@ -38,12 +32,9 @@ jobs:
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           s = manifest.read_text()
           root = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
-          for permission in [
-              '    <uses-permission android:name="android.permission.RECORD_AUDIO" />',
-              '    <uses-permission android:name="android.permission.CAMERA" />',
-          ]:
-              if permission not in s:
-                  s = s.replace(root, root + '\n' + permission, 1)
+          permission = '    <uses-permission android:name="android.permission.RECORD_AUDIO" />'
+          if permission not in s:
+              s = s.replace(root, root + '\n' + permission, 1)
           manifest.write_text(s)
 
           p = Path('android/settings.gradle')
@@ -63,36 +54,6 @@ jobs:
           p.write_text(s)
           PY
 
-      - name: Apply verified release integrations
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('lib/main.dart')
-          s = p.read_text()
-
-          def once(old, new, label):
-              n = s.count(old)
-              if n != 1:
-                  raise SystemExit(f'{label}: expected exactly 1 match, found {n}')
-              return s.replace(old, new, 1)
-
-          s = once("import 'package:url_launcher/url_launcher.dart';", "import 'package:url_launcher/url_launcher.dart';\nimport 'pdf_service.dart';\nimport 'voice_draft_page.dart';", 'imports')
-
-          anchor = "...list.map((x) => Card(child: ListTile(onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => CustomerPage(store: s, customer: x))),"
-          voice = "Card(child: ListTile(leading: const Icon(Icons.mic), title: const Text('التسجيل الصوتي'), subtitle: const Text('سجّل مسودة ثم راجعها قبل الحفظ'), onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => VoiceDraftPage(customers: s.customers, onApprove: (customer, type, amount, note) async { s.transactions.add(Tx(id: makeId(), customerId: customer.id, type: type, amount: amount, date: DateTime.now(), note: note)); await s.save(); }))))),"
-          s = once(anchor, voice + '\n        ' + anchor, 'home voice button')
-
-          old_wrap = "Wrap(spacing: 8, children: [FilledButton.icon(onPressed: () => wa(c), icon: const Icon(Icons.chat), label: const Text('واتساب')), OutlinedButton.icon(onPressed: () => call(c), icon: const Icon(Icons.phone), label: const Text('اتصال'))])"
-          new_wrap = "Wrap(spacing: 8, children: [FilledButton.icon(onPressed: () => wa(c), icon: const Icon(Icons.chat), label: const Text('واتساب')), OutlinedButton.icon(onPressed: () => call(c), icon: const Icon(Icons.phone), label: const Text('اتصال')), OutlinedButton.icon(onPressed: () async { final ops = store.transactions.where((t) => t.customerId == customer.id).toList()..sort((a,b) => b.date.compareTo(a.date)); await DainPayPdf.customerStatement(shop: store.shop, customerName: customer.name, phone: customer.phone, balance: store.balance(customer.id), debts: store.debts(customer.id), paid: store.paid(customer.id), operations: ops.map((t) => {'date': dateText(t.date), 'type': t.type == 'debt' ? 'دين' : 'تسديد', 'amount': money(t.amount), 'note': t.note}).toList()); }, icon: const Icon(Icons.picture_as_pdf), label: const Text('PDF'))])"
-          s = once(old_wrap, new_wrap, 'customer PDF button')
-
-          old_admin = "final x = await widget.store.generateCode(device.text);"
-          new_admin = "final x = await widget.store.generateCode(device.text).timeout(const Duration(seconds: 20), onTimeout: () => null);"
-          s = once(old_admin, new_admin, 'admin timeout')
-
-          p.write_text(s)
-          PY
-
       - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json
@@ -102,7 +63,6 @@ jobs:
       - name: Verify Android permissions
         run: |
           grep -q 'android.permission.RECORD_AUDIO' android/app/src/main/AndroidManifest.xml
-          grep -q 'android.permission.CAMERA' android/app/src/main/AndroidManifest.xml
 
       - name: Get dependencies
         run: flutter pub get

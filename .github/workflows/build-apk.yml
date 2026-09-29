@@ -1,74 +1,78 @@
 name: Build DainPay APK
+
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
+
 permissions:
   contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.24.5"
           channel: stable
           cache: true
-      - name: Generate Android platform
+
+      - name: Prepare Android platform
         run: flutter create . --platforms=android --org com.adreemk --project-name dainpay
+
       - name: Configure Firebase Android plugin
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p=Path('android/settings.gradle'); s=p.read_text(); lines=s.splitlines()
-          if not any('com.google.gms.google-services' in x for x in lines):
-              idx=next(i for i,x in enumerate(lines) if 'id "org.jetbrains.kotlin.android" version' in x)
-              lines.insert(idx+1,'    id "com.google.gms.google-services" version "4.5.0" apply false')
-          p.write_text('\n'.join(lines)+'\n')
-          p=Path('android/app/build.gradle'); s=p.read_text()
-          if 'id "com.google.gms.google-services"' not in s: s=s.replace('id "dev.flutter.flutter-gradle-plugin"','id "dev.flutter.flutter-gradle-plugin"\n    id "com.google.gms.google-services"')
-          s=s.replace('minSdk = flutter.minSdkVersion','minSdk = 23'); p.write_text(s)
-          PY
-      - name: Get dependencies
-        run: flutter pub get
-      - name: Verify and repair known source closings
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('lib/main.dart')
-          s=p.read_text()
-          replacements={
-            "])));}}\nclass CustomerPage": "])));}\nclass CustomerPage",
-            "])));}}\nclass SettingsPage": "])));}\nclass SettingsPage",
-            "])));}}\nclass ActivationPage": "])));}\nclass ActivationPage",
-            "]));}}\nclass AddTransactionPage": "]));}\nclass AddTransactionPage",
-            "]));}}\nclass _AdminGateState": "]));}\nclass _AdminGateState",
-            "]));}}\nclass _AdminPageState": "]));}\nclass _AdminPageState",
-          }
-          for old,new in replacements.items():
-              s=s.replace(old,new)
+          p = Path('android/settings.gradle')
+          s = p.read_text()
+          if 'com.google.gms.google-services' not in s:
+              marker = 'id "org.jetbrains.kotlin.android" version'
+              lines = s.splitlines()
+              idx = next((i for i, line in enumerate(lines) if marker in line), None)
+              if idx is not None:
+                  lines.insert(idx + 1, '    id "com.google.gms.google-services" version "4.4.2" apply false')
+              p.write_text('\n'.join(lines) + '\n')
+
+          p = Path('android/app/build.gradle')
+          s = p.read_text()
+          if 'id "com.google.gms.google-services"' not in s:
+              s = s.replace(
+                  'id "dev.flutter.flutter-gradle-plugin"',
+                  'id "dev.flutter.flutter-gradle-plugin"\n    id "com.google.gms.google-services"'
+              )
+          s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 23')
           p.write_text(s)
           PY
-          dart format --output=none lib/main.dart
-      - name: Apply source integrity prerequisite
-        run: python3 tool/fix_source_integrity_step1.py
-      - name: Apply and verify Step 1 - 10 day trial
-        run: python3 tool/fix_trial_step1.py
-      - name: Parse gate
+
+      - name: Verify Firebase configuration
         run: |
-          echo "--- Step 1 source verification ---"
-          grep -q "const Duration(days:10)" lib/main.dart
-          grep -q "collection('trial_devices')" lib/main.dart
-          grep -q "device_info_plus/device_info_plus.dart" lib/main.dart
-          echo "STEP1_SOURCE_CHECK_OK"
-          dart format --output=none lib/main.dart
-      - name: Analyze
+          test -f android/app/google-services.json
+          grep -q 'dainpay-a29fc' android/app/google-services.json
+          grep -q 'com.adreemk.dainpay' android/app/google-services.json
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Format Dart source
+        run: dart format lib
+
+      - name: Parse and analyze
         run: flutter analyze lib --no-fatal-infos --no-fatal-warnings
+
       - name: Build release APK
         run: flutter build apk --release
+
+      - name: Verify APK
+        run: |
+          test -s build/app/outputs/flutter-apk/app-release.apk
+          ls -lh build/app/outputs/flutter-apk/app-release.apk
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:

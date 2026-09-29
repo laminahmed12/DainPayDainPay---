@@ -25,10 +25,22 @@ jobs:
       - name: Prepare Android platform
         run: flutter create . --platforms=android --org com.adreemk --project-name dainpay
 
-      - name: Configure Firebase Android plugin
+      - name: Configure Android permissions and Firebase plugin
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          s = manifest.read_text()
+          permissions = [
+              '    <uses-permission android:name="android.permission.RECORD_AUDIO" />',
+              '    <uses-permission android:name="android.permission.CAMERA" />',
+          ]
+          for permission in permissions:
+              if permission not in s:
+                  s = s.replace('<manifest xmlns:android="http://schemas.android.com/apk/res/android">', '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n' + permission, 1)
+          manifest.write_text(s)
+
           p = Path('android/settings.gradle')
           s = p.read_text()
           if 'com.google.gms.google-services' not in s:
@@ -55,6 +67,11 @@ jobs:
           test -f android/app/google-services.json
           grep -q 'dainpay-a29fc' android/app/google-services.json
           grep -q 'com.adreemk.dainpay' android/app/google-services.json
+
+      - name: Verify Android permissions
+        run: |
+          grep -q 'android.permission.RECORD_AUDIO' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.CAMERA' android/app/src/main/AndroidManifest.xml
 
       - name: Get dependencies
         run: flutter pub get

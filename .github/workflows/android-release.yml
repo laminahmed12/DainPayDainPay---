@@ -28,8 +28,10 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Install dependencies
-        run: flutter pub get
+      - name: Clean and Install dependencies
+        run: |
+          flutter clean
+          flutter pub get
 
       - name: Analyze code
         run: flutter analyze --no-fatal-warnings --no-fatal-infos

@@ -28,10 +28,17 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Preserve Firebase configuration
+        run: |
+          test -f android/app/google-services.json
+          cp android/app/google-services.json /tmp/google-services.json
+
       - name: Reconstruct Android platform with the registered Firebase package
         run: |
           rm -rf android
           flutter create . --project-name=dainpay --platforms=android --org=com.adreemk
+          mkdir -p android/app
+          cp /tmp/google-services.json android/app/google-services.json
 
       - name: Configure Android SDK and Firebase Gradle plugin
         run: |
@@ -64,9 +71,10 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Restore Firebase configuration
+      - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json
+          grep -q 'com.adreemk.dainpay' android/app/google-services.json
 
       - name: Add required Android permissions
         run: |
@@ -81,7 +89,6 @@ jobs:
           ]
           insert = ''.join(f'    <uses-permission android:name="{p}"/>\n' for p in permissions)
           if 'android.permission.INTERNET' not in text:
-              text = text.replace('<manifest', '<manifest', 1)
               end = text.find('>')
               text = text[:end + 1] + '\n' + insert + text[end + 1:]
           manifest.write_text(text)

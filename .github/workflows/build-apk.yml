@@ -3,7 +3,7 @@ name: Build DainPay APK
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, feature/brand-ui-refresh ]
 
 permissions:
   contents: read
@@ -32,9 +32,13 @@ jobs:
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           s = manifest.read_text()
           root = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
-          permission = '    <uses-permission android:name="android.permission.RECORD_AUDIO" />'
-          if permission not in s:
-              s = s.replace(root, root + '\n' + permission, 1)
+          permissions = [
+              '    <uses-permission android:name="android.permission.RECORD_AUDIO" />',
+              '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />',
+          ]
+          for permission in permissions:
+              if permission not in s:
+                  s = s.replace(root, root + '\n' + permission, 1)
           manifest.write_text(s)
 
           p = Path('android/settings.gradle')

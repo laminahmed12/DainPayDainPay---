@@ -1,4 +1,4 @@
-// Updated DainPay Code
+// Updated DainPay Code - Full Fixes for Customers Logic & Voice Draft Deletion
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -620,6 +620,12 @@ class Store extends ChangeNotifier {
     return true;
   }
 
+  Future<void> deleteVoiceDraft(String id) async {
+    voiceDrafts.removeWhere((draft) => draft.id == id);
+    await saveLocal();
+    safeNotify();
+  }
+
   Future<void> syncAll() async {
     if (!firebaseReady || uid.isEmpty) return;
 
@@ -911,7 +917,8 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   String query = '';
-  String filter = 'all';
+  // جعل التصفية الافتراضية 'debt' لإخفاء العملاء المسددين تلقائياً عند فتح القائمة
+  String filter = 'debt';
 
   int taps = 0;
   DateTime? lastTap;
@@ -1032,7 +1039,7 @@ class _HomePageState extends State<HomePage> {
                       child: _Stat(title: 'إجمالي المتبقي', value: money(total), color: burgundy),
                     ),
                     Expanded(
-                      child: _Stat(title: 'العملاء', value: '${store.customers.length}', color: emerald),
+                      child: _Stat(title: 'العملاء عليهم دَين', value: '${filtered.length}', color: emerald),
                     ),
                   ],
                 ),
@@ -1068,11 +1075,6 @@ class _HomePageState extends State<HomePage> {
               spacing: 8,
               children: [
                 ChoiceChip(
-                  label: const Text('الكل'),
-                  selected: filter == 'all',
-                  onSelected: (_) => setState(() => filter = 'all'),
-                ),
-                ChoiceChip(
                   label: const Text('عليهم دَين'),
                   selected: filter == 'debt',
                   onSelected: (_) => setState(() => filter = 'debt'),
@@ -1081,6 +1083,11 @@ class _HomePageState extends State<HomePage> {
                   label: const Text('مسدد'),
                   selected: filter == 'paid',
                   onSelected: (_) => setState(() => filter = 'paid'),
+                ),
+                ChoiceChip(
+                  label: const Text('الكل'),
+                  selected: filter == 'all',
+                  onSelected: (_) => setState(() => filter = 'all'),
                 ),
               ],
             ),
@@ -1690,19 +1697,42 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
             ),
           ...drafts.map((draft) {
             final customer = widget.store.customers.where((c) => c.id == draft.customerId).firstOrNull;
-            return Card(
-              child: ListTile(
-                title: Text(customer?.name ?? 'عميل غير محدد'),
-                subtitle: Text('${draft.text}\nالمبلغ: ${money(draft.amountCents)}'),
-                isThreeLine: true,
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => VoiceReviewPage(store: widget.store, draft: draft),
-                    ),
-                  );
-                },
+            return Dismissible(
+              key: Key(draft.id),
+              direction: DismissDirection.endToStart,
+              background: Container(
+                color: burgundy,
+                alignment: Alignment.centerLeft,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: const Icon(Icons.delete_forever, color: Colors.white),
+              ),
+              onDismissed: (_) async {
+                await widget.store.deleteVoiceDraft(draft.id);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('تم حذف المسودة الصوتية')),
+                );
+              },
+              child: Card(
+                child: ListTile(
+                  title: Text(customer?.name ?? 'عميل غير محدد'),
+                  subtitle: Text('${draft.text}\nالمبلغ: ${money(draft.amountCents)}'),
+                  isThreeLine: true,
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline, color: burgundy),
+                    onPressed: () async {
+                      await widget.store.deleteVoiceDraft(draft.id);
+                      setState(() {});
+                    },
+                  ),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => VoiceReviewPage(store: widget.store, draft: draft),
+                      ),
+                    );
+                  },
+                ),
               ),
             );
           }),

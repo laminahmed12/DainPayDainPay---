@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -8,384 +10,899 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:url_launcher/url_launcher.dart';
 
-const emerald = Color(0xFF0F5C6E), mint = Color(0xFF2EC4B6), burgundy = Color(0xFFE63946);
+const Color emerald = Color(0xFF0F5C6E);
+const Color mint = Color(0xFF2EC4B6);
+const Color burgundy = Color(0xFFE63946);
+
+// التعديل 1: تعديل فترة التجربة إلى 7 أيام بدلاً من 10
+const int trialLengthDays = 7;
+const String adminPin = '116936';
+const String appTitle = 'DainPay — دَيْن';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  final store = await Store.load();
+
   try {
-    await Firebase.initializeApp();
-  } catch (e) {
-    debugPrint('Firebase init: $e');
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp();
+    }
+    store.firebaseInitialized = true;
+  } catch (e, stack) {
+    store.firebaseInitialized = false;
+    debugPrint('Firebase initialization error: $e');
+    debugPrintStack(stackTrace: stack);
   }
-  final s = await Store.load();
-  await s.connectFirebase();
-  runApp(DainPayApp(store: s));
+
+  await store.connectFirebase();
+  runApp(DainPayApp(store: store));
 }
 
-String makeId() => '${DateTime.now().microsecondsSinceEpoch}_${Random().nextInt(999999)}';
-String money(int cents) => '${(cents / 100).toStringAsFixed(2)} د.ل';
-String dateText(DateTime d) => '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
-String timeText(DateTime d) => '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
 
-int parseCents(String v) {
-  final n = double.tryParse(v.trim().replaceAll('٬', '').replaceAll(',', '.'));
-  return n == null ? 0 : (n * 100).round();
+String makeId() {
+  return '${DateTime.now().microsecondsSinceEpoch}_'
+      '${Random.secure().nextInt(1000000)}';
 }
 
-String phone218(String v) {
-  var p = v.replaceAll(RegExp(r'[^0-9]'), '');
-  if (p.startsWith('00')) p = p.substring(2);
-  if (p.startsWith('218')) return p;
-  if (p.startsWith('0')) return '218${p.substring(1)}';
-  return p;
+String money(int cents) {
+  final sign = cents < 0 ? '-' : '';
+  final value = cents.abs();
+
+  return '$sign${value ~/ 100}.'
+      '${(value % 100).toString().padLeft(2, '0')} د.ل';
 }
 
-Future<bool> wa(String phone, String msg) async {
-  final n = phone218(phone);
-  if (n.isEmpty) return false;
+String dateText(DateTime date) {
+  return '${date.day.toString().padLeft(2, '0')}/'
+      '${date.month.toString().padLeft(2, '0')}/'
+      '${date.year}';
+}
+
+String timeText(DateTime date) {
+  return '${date.hour.toString().padLeft(2, '0')}:'
+      '${date.minute.toString().padLeft(2, '0')}';
+}
+
+String _digits(String value) {
+  const arabic = '٠١٢٣٤٥٦٧٨٩';
+  const persian = '۰۱۲۳۴۵۶۷۸۹';
+
+  var output = value;
+
+  for (var i = 0; i < 10; i++) {
+    output = output
+        .replaceAll(arabic[i], '$i')
+        .replaceAll(persian[i], '$i');
+  }
+
+  return output;
+}
+
+int parseCents(String value) {
+  var v = _digits(value)
+      .trim()
+      .replaceAll(RegExp(r'\s+'), '')
+      .replaceAll('٬', '')
+      .replaceAll('،', ',');
+
+  if (v.isEmpty) return 0;
+
+  final comma = v.lastIndexOf(',');
+  final dot = v.lastIndexOf('.');
+
+  if (comma >= 0 && dot >= 0) {
+    final separator = max(comma, dot);
+
+    final integerPart = v
+        .substring(0, separator)
+        .replaceAll(RegExp(r'[,.]'), '');
+
+    final fraction = v
+        .substring(separator + 1)
+        .replaceAll(RegExp(r'[^0-9]'), '');
+
+    return _partsToCents(integerPart, fraction);
+  }
+
+  if (comma >= 0 || dot >= 0) {
+    final separator = comma >= 0 ? comma : dot;
+
+    final integerPart = v
+        .substring(0, separator)
+        .replaceAll(RegExp(r'[^0-9-]'), '');
+
+    final fraction = v
+        .substring(separator + 1)
+        .replaceAll(RegExp(r'[^0-9]'), '');
+
+    if (fraction.length <= 2) {
+      return _partsToCents(integerPart, fraction);
+    }
+
+    final joined = v.replaceAll(RegExp(r'[^0-9-]'), '');
+    final amount = int.tryParse(joined) ?? 0;
+
+    return max(0, amount * 100);
+  }
+
+  final amount =
+      int.tryParse(v.replaceAll(RegExp(r'[^0-9-]'), '')) ?? 0;
+
+  return max(0, amount * 100);
+}
+
+int _partsToCents(String integerPart, String fraction) {
+  final whole =
+      int.tryParse(integerPart.replaceAll(RegExp(r'[^0-9-]'), '')) ?? 0;
+
+  final f = fraction.padRight(2, '0').substring(0, 2);
+  final cents = int.tryParse(f) ?? 0;
+
+  return max(0, whole * 100 + cents);
+}
+
+String phone218(String value) {
+  var phone = _digits(value).replaceAll(RegExp(r'[^0-9]'), '');
+
+  if (phone.startsWith('00')) {
+    phone = phone.substring(2);
+  }
+
+  if (phone.startsWith('218')) {
+    return phone;
+  }
+
+  if (phone.startsWith('0')) {
+    return '218${phone.substring(1)}';
+  }
+
+  return phone;
+}
+
+Future<bool> launchWhatsApp(
+  String phone,
+  String message,
+) async {
+  final number = phone218(phone);
+
+  if (number.isEmpty) {
+    return false;
+  }
+
   try {
-    return await launchUrl(Uri.https('wa.me', '/$n', {'text': msg}), mode: LaunchMode.externalApplication);
-  } catch (_) {
+    final uri = Uri.https(
+      'wa.me',
+      '/$number',
+      {'text': message},
+    );
+
+    return await launchUrl(
+      uri,
+      mode: LaunchMode.externalApplication,
+    );
+  } catch (e) {
+    debugPrint('WhatsApp error: $e');
     return false;
   }
 }
 
+Future<bool> makePhoneCall(String phone) async {
+  final clean = _digits(phone).replaceAll(
+    RegExp(r'[^0-9+]'),
+    '',
+  );
+
+  if (clean.isEmpty) return false;
+
+  try {
+    return await launchUrl(
+      Uri.parse('tel:$clean'),
+      mode: LaunchMode.externalApplication,
+    );
+  } catch (e) {
+    debugPrint('Phone error: $e');
+    return false;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Models
+// -----------------------------------------------------------------------------
+
 class Customer {
-  Customer({required this.id, required this.name, required this.phone, this.limitCents = 0});
-  String id, name, phone;
+  Customer({
+    required this.id,
+    required this.name,
+    required this.phone,
+    this.limitCents = 0,
+  });
+
+  String id;
+  String name;
+  String phone;
   int limitCents;
 
-  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'phone': phone, 'limitCents': limitCents};
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      'phone': phone,
+      'limitCents': limitCents,
+    };
+  }
 
-  factory Customer.fromJson(Map<String, dynamic> j) {
-    final legacy = (j['limit'] as num?)?.toDouble() ?? 0;
+  factory Customer.fromJson(Map<String, dynamic> json) {
+    final legacy = json['limit'];
+
     return Customer(
-      id: '${j['id'] ?? ''}',
-      name: '${j['name'] ?? ''}',
-      phone: '${j['phone'] ?? ''}',
-      limitCents: j['limitCents'] is num ? (j['limitCents'] as num).toInt() : (legacy * 100).round(),
+      id: '${json['id'] ?? ''}',
+      name: '${json['name'] ?? ''}',
+      phone: '${json['phone'] ?? ''}',
+      limitCents: json['limitCents'] is num
+          ? (json['limitCents'] as num).toInt()
+          : legacy is num
+              ? (legacy.toDouble() * 100).round()
+              : 0,
     );
   }
 }
 
 class Tx {
-  Tx({required this.id, required this.customerId, required this.type, required this.amountCents, required this.date, required this.note});
-  String id, customerId, type, note;
+  Tx({
+    required this.id,
+    required this.customerId,
+    required this.type,
+    required this.amountCents,
+    required this.date,
+    this.note = '',
+  });
+
+  String id;
+  String customerId;
+  String type;
   int amountCents;
   DateTime date;
+  String note;
 
-  Map<String, dynamic> toJson() => {'id': id, 'customerId': customerId, 'type': type, 'amountCents': amountCents, 'date': date.toIso8601String(), 'note': note};
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'customerId': customerId,
+      'type': type,
+      'amountCents': amountCents,
+      'date': date.toIso8601String(),
+      'note': note,
+    };
+  }
 
-  factory Tx.fromJson(Map<String, dynamic> j) {
-    final legacy = (j['amount'] as num?)?.toDouble() ?? 0;
+  factory Tx.fromJson(Map<String, dynamic> json) {
+    final legacy = json['amount'];
+    DateTime parsedDate;
+
+    final rawDate = json['date'];
+
+    if (rawDate is Timestamp) {
+      parsedDate = rawDate.toDate();
+    } else {
+      parsedDate =
+          DateTime.tryParse('${rawDate ?? ''}') ?? DateTime.now();
+    }
+
     return Tx(
-      id: '${j['id'] ?? ''}',
-      customerId: '${j['customerId'] ?? ''}',
-      type: '${j['type'] ?? 'debt'}',
-      amountCents: j['amountCents'] is num ? (j['amountCents'] as num).toInt() : (legacy * 100).round(),
-      date: DateTime.tryParse('${j['date']}') ?? DateTime.now(),
-      note: '${j['note'] ?? ''}',
+      id: '${json['id'] ?? ''}',
+      customerId: '${json['customerId'] ?? ''}',
+      type: json['type'] == 'payment' ? 'payment' : 'debt',
+      amountCents: json['amountCents'] is num
+          ? (json['amountCents'] as num).toInt()
+          : legacy is num
+              ? (legacy.toDouble() * 100).round()
+              : 0,
+      date: parsedDate,
+      note: '${json['note'] ?? ''}',
     );
   }
 }
 
 class VoiceDraft {
-  VoiceDraft({required this.id, required this.text, required this.date, required this.customerId, required this.amountCents, required this.note});
-  String id, text, customerId, note;
+  VoiceDraft({
+    required this.id,
+    required this.text,
+    required this.date,
+    required this.customerId,
+    required this.amountCents,
+    required this.note,
+  });
+
+  String id;
+  String text;
   DateTime date;
+  String customerId;
   int amountCents;
+  String note;
 
-  Map<String, dynamic> toJson() => {'id': id, 'text': text, 'date': date.toIso8601String(), 'customerId': customerId, 'amountCents': amountCents, 'note': note};
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'text': text,
+      'date': date.toIso8601String(),
+      'customerId': customerId,
+      'amountCents': amountCents,
+      'note': note,
+    };
+  }
 
-  factory VoiceDraft.fromJson(Map<String, dynamic> j) {
-    final legacy = (j['amount'] as num?)?.toDouble() ?? 0;
+  factory VoiceDraft.fromJson(Map<String, dynamic> json) {
+    final legacy = json['amount'];
+
     return VoiceDraft(
-      id: '${j['id'] ?? ''}',
-      text: '${j['text'] ?? ''}',
-      date: DateTime.tryParse('${j['date']}') ?? DateTime.now(),
-      customerId: '${j['customerId'] ?? ''}',
-      amountCents: j['amountCents'] is num ? (j['amountCents'] as num).toInt() : (legacy * 100).round(),
-      note: '${j['note'] ?? ''}',
+      id: '${json['id'] ?? ''}',
+      text: '${json['text'] ?? ''}',
+      date: DateTime.tryParse('${json['date'] ?? ''}') ?? DateTime.now(),
+      customerId: '${json['customerId'] ?? ''}',
+      amountCents: json['amountCents'] is num
+          ? (json['amountCents'] as num).toInt()
+          : legacy is num
+              ? (legacy.toDouble() * 100).round()
+              : 0,
+      note: '${json['note'] ?? ''}',
     );
   }
 }
 
+// -----------------------------------------------------------------------------
+// Store
+// -----------------------------------------------------------------------------
+
 class Store extends ChangeNotifier {
   late SharedPreferences prefs;
-  final customers = <Customer>[];
-  final transactions = <Tx>[];
-  final voiceDrafts = <VoiceDraft>[];
-  String shop = 'DainPay — دَيْن', whatsappMessage = 'السلام عليكم [الاسم]، تذكير لطيف بخصوص المتبقي عليكم قدره [المبلغ] د.ل.', uid = '', deviceId = '';
-  bool firebaseReady = false, syncing = false, activated = false, isAdmin = false, dark = false;
+
+  final List<Customer> customers = [];
+  final List<Tx> transactions = [];
+  final List<VoiceDraft> voiceDrafts = [];
+
+  String shop = appTitle;
+  String whatsappMessage =
+      'السلام عليكم [الاسم]، تذكير لطيف بخصوص المتبقي عليكم قدره [المبلغ].';
+
+  String uid = '';
+  String deviceId = '';
   DateTime? trialStart;
 
+  bool firebaseInitialized = false;
+  bool firebaseReady = false;
+  bool syncing = false;
+  bool activated = false;
+  bool dark = false;
+  bool isAdmin = false;
+
+  bool _disposed = false;
+  bool _syncQueued = false;
+  Future<void>? _syncFuture;
+
   static Future<Store> load() async {
-    final s = Store();
-    s.prefs = await SharedPreferences.getInstance();
-    s.shop = s.prefs.getString('shop') ?? s.shop;
-    s.whatsappMessage = s.prefs.getString('whatsappMessage') ?? s.whatsappMessage;
-    s.dark = s.prefs.getBool('dark') ?? false;
-    s.activated = s.prefs.getBool('activated') ?? false;
-    s.deviceId = s.prefs.getString('device_id') ?? '';
-    if (s.deviceId.isEmpty) {
-      s.deviceId = 'DP-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(999999)}';
-      await s.pref(() => s.prefs.setString('device_id', s.deviceId));
+    final store = Store();
+    store.prefs = await SharedPreferences.getInstance();
+
+    store.shop = store.prefs.getString('shop') ?? appTitle;
+    store.whatsappMessage =
+        store.prefs.getString('whatsappMessage') ?? store.whatsappMessage;
+    store.dark = store.prefs.getBool('dark') ?? false;
+    store.activated = store.prefs.getBool('activated') ?? false;
+    store.deviceId = store.prefs.getString('device_id') ?? '';
+
+    if (store.deviceId.isEmpty) {
+      store.deviceId =
+          'DP-${DateTime.now().millisecondsSinceEpoch}-${Random.secure().nextInt(1000000)}';
+      await store._pref(() => store.prefs.setString('device_id', store.deviceId));
     }
-    final tr = s.prefs.getString('trial_start');
-    if (tr == null) {
-      s.trialStart = DateTime.now();
-      await s.pref(() => s.prefs.setString('trial_start', s.trialStart!.toIso8601String()));
+
+    final savedTrial = store.prefs.getString('trial_start');
+    if (savedTrial == null) {
+      store.trialStart = DateTime.now();
+      await store._pref(
+        () => store.prefs.setString('trial_start', store.trialStart!.toIso8601String()),
+      );
     } else {
-      s.trialStart = DateTime.tryParse(tr);
+      store.trialStart = DateTime.tryParse(savedTrial);
+      if (store.trialStart == null) {
+        store.trialStart = DateTime.now();
+        await store._pref(
+          () => store.prefs.setString('trial_start', store.trialStart!.toIso8601String()),
+        );
+      }
     }
-    try {
-      final a = jsonDecode(s.prefs.getString('customers') ?? '[]') as List;
-      s.customers.addAll(a.map((e) => Customer.fromJson(Map<String, dynamic>.from(e))));
-    } catch (_) {}
-    try {
-      final a = jsonDecode(s.prefs.getString('transactions') ?? '[]') as List;
-      s.transactions.addAll(a.map((e) => Tx.fromJson(Map<String, dynamic>.from(e))));
-    } catch (_) {}
-    try {
-      final a = jsonDecode(s.prefs.getString('voice_drafts') ?? '[]') as List;
-      s.voiceDrafts.addAll(a.map((e) => VoiceDraft.fromJson(Map<String, dynamic>.from(e))));
-    } catch (_) {}
-    return s;
+
+    store._loadList('customers', (json) => store.customers.add(Customer.fromJson(json)));
+    store._loadList('transactions', (json) => store.transactions.add(Tx.fromJson(json)));
+    store._loadList('voice_drafts', (json) => store.voiceDrafts.add(VoiceDraft.fromJson(json)));
+
+    return store;
   }
 
-  Future<void> pref(Future<bool> Function() f) async {
+  void _loadList(String key, void Function(Map<String, dynamic>) add) {
     try {
-      await f();
+      final raw = jsonDecode(prefs.getString(key) ?? '[]');
+      if (raw is List) {
+        for (final item in raw) {
+          if (item is Map) {
+            add(Map<String, dynamic>.from(item));
+          }
+        }
+      }
     } catch (e) {
-      debugPrint('Prefs: $e');
+      debugPrint('Local data read [$key]: $e');
     }
   }
 
-  int get trialDaysLeft => activated || trialStart == null ? 0 : max(0, 10 - DateTime.now().difference(trialStart!).inDays);
+  Future<void> _pref(Future<bool> Function() action) async {
+    try {
+      await action();
+    } catch (e) {
+      debugPrint('SharedPreferences error: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  void safeNotify() {
+    if (!_disposed) {
+      notifyListeners();
+    }
+  }
+
+  int get trialDaysLeft {
+    if (activated) return 0;
+    final start = trialStart;
+    if (start == null) return trialLengthDays;
+
+    final elapsedDays = DateTime.now().difference(start).inDays;
+    return max(0, trialLengthDays - elapsedDays);
+  }
+
   bool get locked => !activated && trialDaysLeft <= 0;
 
-  CollectionReference<Map<String, dynamic>> get cr => FirebaseFirestore.instance.collection('users').doc(uid).collection('customers');
-  CollectionReference<Map<String, dynamic>> get tr => FirebaseFirestore.instance.collection('users').doc(uid).collection('transactions');
+  CollectionReference<Map<String, dynamic>> get userRef =>
+      FirebaseFirestore.instance.collection('users');
+
+  CollectionReference<Map<String, dynamic>> get activationCodesRef =>
+      FirebaseFirestore.instance.collection('activation_codes');
+
+  CollectionReference<Map<String, dynamic>> get customerRef =>
+      userRef.doc(uid).collection('customers');
+
+  CollectionReference<Map<String, dynamic>> get transactionRef =>
+      userRef.doc(uid).collection('transactions');
 
   Future<void> connectFirebase() async {
+    if (!firebaseInitialized) {
+      firebaseReady = false;
+      safeNotify();
+      return;
+    }
+
     try {
-      var u = FirebaseAuth.instance.currentUser;
-      u ??= (await FirebaseAuth.instance.signInAnonymously()).user;
-      if (u == null) return;
-      uid = u.uid;
+      User? user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        final credential = await FirebaseAuth.instance.signInAnonymously();
+        user = credential.user;
+      }
+
+      if (user == null) {
+        firebaseReady = false;
+        safeNotify();
+        return;
+      }
+
+      uid = user.uid;
       firebaseReady = true;
+
       await pullCloud();
       await loadActivation();
-    } catch (e) {
+
+      safeNotify();
+    } catch (e, stack) {
       firebaseReady = false;
-      debugPrint('Firebase: $e');
+      debugPrint('Firebase connection error: $e');
+      debugPrintStack(stackTrace: stack);
+      safeNotify();
     }
-    notifyListeners();
   }
 
   Future<void> loadActivation() async {
-    if (!firebaseReady) return;
+    if (!firebaseReady || uid.isEmpty) return;
+
     try {
-      final d = await FirebaseFirestore.instance.collection('device_activations').doc(deviceId).get();
-      if (d.data()?['activated'] == true) {
+      final snap = await userRef.doc(uid).get();
+      final data = snap.data();
+
+      if (data?['activated'] == true) {
         activated = true;
-        await pref(() => prefs.setBool('activated', true));
+        await _pref(() => prefs.setBool('activated', true));
       }
     } catch (e) {
-      debugPrint('Activation: $e');
+      debugPrint('Activation state error: $e');
     }
   }
 
   Future<void> pullCloud() async {
-    if (!firebaseReady || uid.isEmpty || syncing) return;
-    syncing = true;
+    if (!firebaseReady || uid.isEmpty) return;
+
     try {
-      for (final d in (await cr.get()).docs) {
-        final c = Customer.fromJson(d.data());
-        final i = customers.indexWhere((x) => x.id == c.id);
-        if (i < 0) customers.add(c); else customers[i] = c;
+      final customerDocs = await customerRef.get();
+      final txDocs = await transactionRef.get();
+
+      for (final doc in customerDocs.docs) {
+        final data = Map<String, dynamic>.from(doc.data());
+        data['id'] ??= doc.id;
+        final item = Customer.fromJson(data);
+        final index = customers.indexWhere((c) => c.id == item.id);
+        if (index == -1) {
+          customers.add(item);
+        } else {
+          customers[index] = item;
+        }
       }
-      for (final d in (await tr.get()).docs) {
-        final x = d.data();
-        final raw = x['date'];
-        final dt = raw is Timestamp ? raw.toDate() : DateTime.tryParse('$raw') ?? DateTime.now();
-        final legacy = (x['amount'] as num?)?.toDouble() ?? 0;
-        final t = Tx(
-          id: '${x['id'] ?? d.id}',
-          customerId: '${x['customerId'] ?? ''}',
-          type: '${x['type'] ?? 'debt'}',
-          amountCents: x['amountCents'] is num ? (x['amountCents'] as num).toInt() : (legacy * 100).round(),
-          date: dt,
-          note: '${x['note'] ?? ''}',
-        );
-        final i = transactions.indexWhere((z) => z.id == t.id);
-        if (i < 0) transactions.add(t); else transactions[i] = t;
+
+      for (final doc in txDocs.docs) {
+        final data = Map<String, dynamic>.from(doc.data());
+        data['id'] ??= doc.id;
+
+        final rawDate = data['date'];
+        if (rawDate is Timestamp) {
+          data['date'] = rawDate.toDate().toIso8601String();
+        }
+
+        final item = Tx.fromJson(data);
+        final index = transactions.indexWhere((t) => t.id == item.id);
+        if (index == -1) {
+          transactions.add(item);
+        } else {
+          transactions[index] = item;
+        }
       }
+
       await saveLocal();
+      safeNotify();
     } catch (e) {
-      debugPrint('Pull: $e');
-    } finally {
-      syncing = false;
+      debugPrint('Cloud pull error: $e');
     }
   }
 
   Future<void> saveLocal() async {
-    await pref(() => prefs.setString('customers', jsonEncode(customers.map((e) => e.toJson()).toList())));
-    await pref(() => prefs.setString('transactions', jsonEncode(transactions.map((e) => e.toJson()).toList())));
-    await pref(() => prefs.setString('voice_drafts', jsonEncode(voiceDrafts.map((e) => e.toJson()).toList())));
-    await pref(() => prefs.setString('shop', shop));
-    await pref(() => prefs.setString('whatsappMessage', whatsappMessage));
-    await pref(() => prefs.setBool('dark', dark));
+    await _pref(() => prefs.setString('customers', jsonEncode(customers.map((e) => e.toJson()).toList())));
+    await _pref(() => prefs.setString('transactions', jsonEncode(transactions.map((e) => e.toJson()).toList())));
+    await _pref(() => prefs.setString('voice_drafts', jsonEncode(voiceDrafts.map((e) => e.toJson()).toList())));
+    await _pref(() => prefs.setString('shop', shop));
+    await _pref(() => prefs.setString('whatsappMessage', whatsappMessage));
+    await _pref(() => prefs.setBool('dark', dark));
+    await _pref(() => prefs.setBool('activated', activated));
   }
 
   Future<void> save() async {
     await saveLocal();
-    notifyListeners();
+    safeNotify();
     await syncAll();
   }
 
-  Future<void> saveCustomer(Customer c) async {
-    customers.add(c);
+  Future<bool> saveCustomer(Customer customer) async {
+    final normalizedName = customer.name.trim().toLowerCase();
+    final normalizedPhone = phone218(customer.phone);
+
+    final duplicate = customers.any((existing) {
+      final sameName = existing.name.trim().toLowerCase() == normalizedName;
+      final existingPhone = phone218(existing.phone);
+      final samePhone = normalizedPhone.isNotEmpty && existingPhone.isNotEmpty && normalizedPhone == existingPhone;
+      return sameName && samePhone;
+    });
+
+    if (duplicate) return false;
+
+    customer.phone = customer.phone.trim();
+    customers.add(customer);
     await save();
+    return true;
   }
 
-  Future<void> saveTx(Tx t) async {
-    transactions.add(t);
+  Future<bool> saveTx(Tx transaction) async {
+    if (transaction.amountCents <= 0) return false;
+    if (transaction.type != 'debt' && transaction.type != 'payment') return false;
+
+    transactions.add(transaction);
     await save();
+    return true;
   }
 
   Future<void> syncAll() async {
-    if (!firebaseReady || uid.isEmpty || syncing) return;
-    syncing = true;
+    if (!firebaseReady || uid.isEmpty) return;
+
+    final running = _syncFuture;
+    if (running != null) {
+      _syncQueued = true;
+      await running;
+      return;
+    }
+
+    final future = _performSync();
+    _syncFuture = future;
+
     try {
-      final b = FirebaseFirestore.instance.batch();
-      for (final c in customers) {
-        b.set(cr.doc(c.id), c.toJson());
-      }
-      for (final t in transactions) {
-        b.set(tr.doc(t.id), {...t.toJson(), 'date': Timestamp.fromDate(t.date)});
-      }
-      await b.commit();
-    } catch (e) {
-      debugPrint('Batch: $e');
+      await future;
     } finally {
-      syncing = false;
+      if (identical(_syncFuture, future)) {
+        _syncFuture = null;
+      }
+    }
+
+    if (_syncQueued) {
+      _syncQueued = false;
+      await syncAll();
     }
   }
 
-  int balance(String id) => transactions.where((t) => t.customerId == id).fold(0, (a, t) => a + (t.type == 'debt' ? t.amountCents : -t.amountCents));
-  int debts(String id) => transactions.where((t) => t.customerId == id && t.type == 'debt').fold(0, (a, t) => a + t.amountCents);
-  int paid(String id) => transactions.where((t) => t.customerId == id && t.type == 'payment').fold(0, (a, t) => a + t.amountCents);
+  Future<void> _performSync() async {
+    syncing = true;
+    safeNotify();
 
-  String risk(String id) {
-    final b = balance(id);
-    if (b <= 0) return 'مسدد';
-    final ds = transactions.where((t) => t.customerId == id && t.type == 'debt').toList()..sort((a, b) => a.date.compareTo(b.date));
-    if (ds.isEmpty) return 'حديث';
-    final d = DateTime.now().difference(ds.first.date).inDays;
-    if (d > 90) return 'خطر';
-    if (d > 30) return 'متأخر';
+    try {
+      final firestore = FirebaseFirestore.instance;
+      final customerList = List<Customer>.from(customers);
+      final transactionList = List<Tx>.from(transactions);
+      final operations = <void Function(WriteBatch)>[];
+
+      for (final customer in customerList) {
+        operations.add((batch) {
+          batch.set(customerRef.doc(customer.id), customer.toJson(), SetOptions(merge: true));
+        });
+      }
+
+      for (final transaction in transactionList) {
+        operations.add((batch) {
+          batch.set(
+            transactionRef.doc(transaction.id),
+            {
+              ...transaction.toJson(),
+              'date': Timestamp.fromDate(transaction.date),
+            },
+            SetOptions(merge: true),
+          );
+        });
+      }
+
+      const chunkSize = 450;
+      for (var start = 0; start < operations.length; start += chunkSize) {
+        final end = min(start + chunkSize, operations.length);
+        final batch = firestore.batch();
+        for (var i = start; i < end; i++) {
+          operations[i](batch);
+        }
+        await batch.commit();
+      }
+    } catch (e) {
+      debugPrint('Cloud sync error: $e');
+    } finally {
+      syncing = false;
+      safeNotify();
+    }
+  }
+
+  int balance(String customerId) {
+    return transactions
+        .where((t) => t.customerId == customerId)
+        .fold<int>(0, (sum, t) => sum + (t.type == 'debt' ? t.amountCents : -t.amountCents));
+  }
+
+  int debts(String customerId) {
+    return transactions
+        .where((t) => t.customerId == customerId && t.type == 'debt')
+        .fold<int>(0, (sum, t) => sum + t.amountCents);
+  }
+
+  int paid(String customerId) {
+    return transactions
+        .where((t) => t.customerId == customerId && t.type == 'payment')
+        .fold<int>(0, (sum, t) => sum + t.amountCents);
+  }
+
+  String risk(String customerId) {
+    final current = balance(customerId);
+    if (current <= 0) return 'مسدد';
+
+    final debtsForCustomer = transactions
+        .where((t) => t.customerId == customerId && t.type == 'debt')
+        .toList()
+      ..sort((a, b) => a.date.compareTo(b.date));
+
+    if (debtsForCustomer.isEmpty) return 'حديث';
+
+    final days = DateTime.now().difference(debtsForCustomer.first.date).inDays;
+    if (days > 90) return 'خطر';
+    if (days > 30) return 'متأخر';
     return 'حديث';
   }
 
   Future<bool> activateCode(String code) async {
-    if (!firebaseReady || code.trim().isEmpty) return false;
-    final ref = FirebaseFirestore.instance.collection('activation_codes').doc(code.trim());
+    if (!firebaseReady || uid.isEmpty) return false;
+
+    final clean = _digits(code).trim();
+    if (clean.isEmpty) return false;
+
+    final ref = activationCodesRef.doc(clean);
+
     try {
-      final ok = await FirebaseFirestore.instance.runTransaction<bool>((tx) async {
-        final snap = await tx.get(ref);
-        final d = snap.data();
-        if (!snap.exists || d == null || d['used'] == true) return false;
-        final bound = '${d['deviceId'] ?? ''}';
-        if (bound.isNotEmpty && bound != deviceId) return false;
-        tx.update(ref, {'used': true, 'usedAt': FieldValue.serverTimestamp(), 'usedDeviceId': deviceId});
+      final success = await FirebaseFirestore.instance.runTransaction<bool>((transaction) async {
+        final snap = await transaction.get(ref);
+        if (!snap.exists) return false;
+
+        final data = snap.data();
+        if (data == null || data['used'] == true) return false;
+
+        final boundDevice = '${data['deviceId'] ?? ''}'.trim();
+        if (boundDevice.isNotEmpty && boundDevice != deviceId) return false;
+
+        transaction.update(ref, {
+          'used': true,
+          'usedAt': FieldValue.serverTimestamp(),
+          'usedDeviceId': deviceId,
+          'usedUid': uid,
+        });
+
         return true;
       });
-      if (!ok) return false;
-      await FirebaseFirestore.instance.collection('device_activations').doc(deviceId).set({'activated': true, 'activatedAt': FieldValue.serverTimestamp(), 'uid': uid});
+
+      if (!success) return false;
+
+      await userRef.doc(uid).set({
+        'activated': true,
+        'activatedAt': FieldValue.serverTimestamp(),
+        'deviceId': deviceId,
+      }, SetOptions(merge: true));
+
       activated = true;
-      await pref(() => prefs.setBool('activated', true));
-      notifyListeners();
+      await saveLocal();
+      safeNotify();
       return true;
     } catch (e) {
-      debugPrint('Activate: $e');
+      debugPrint('Activation error: $e');
       return false;
     }
   }
 
-  Future<bool> checkAdmin(String pin) async {
-    if (!firebaseReady) return false;
+  Future<String?> generateCode(String targetDevice) async {
+    if (!firebaseReady || !isAdmin || targetDevice.trim().isEmpty) return null;
+
+    final device = targetDevice.trim();
+
     try {
-      final d = await FirebaseFirestore.instance.collection('config').doc('admin').get();
-      if (d.data()?['pin'] == pin) {
-        isAdmin = true;
-        notifyListeners();
-        return true;
+      for (var attempt = 0; attempt < 20; attempt++) {
+        final code = (100000 + Random.secure().nextInt(900000)).toString();
+        final ref = activationCodesRef.doc(code);
+        final exists = await ref.get();
+
+        if (exists.exists) continue;
+
+        await ref.set({
+          'deviceId': device,
+          'used': false,
+          'createdAt': FieldValue.serverTimestamp(),
+          'createdByUid': uid,
+        });
+
+        return code;
       }
     } catch (e) {
-      debugPrint('Admin: $e');
+      debugPrint('Generate activation code error: $e');
     }
-    return false;
+
+    return null;
   }
 
-  Future<String?> generateCode(String device) async {
-    if (!firebaseReady || !isAdmin || device.trim().isEmpty) return null;
-    try {
-      final code = (100000 + Random().nextInt(900000)).toString();
-      await FirebaseFirestore.instance.collection('activation_codes').doc(code).set({'deviceId': device.trim(), 'used': false, 'createdAt': FieldValue.serverTimestamp()});
-      return code;
-    } catch (e) {
-      debugPrint('Code: $e');
-      return null;
-    }
+  bool checkAdminLocal(String pin) {
+    final valid = _digits(pin).trim() == adminPin;
+    isAdmin = valid;
+    safeNotify();
+    return valid;
   }
 }
 
+// -----------------------------------------------------------------------------
+// Application
+// -----------------------------------------------------------------------------
+
 class DainPayApp extends StatelessWidget {
   const DainPayApp({super.key, required this.store});
+
   final Store store;
 
-  ThemeData theme(Brightness b) {
-    final cs = ColorScheme.fromSeed(seedColor: emerald, brightness: b).copyWith(primary: emerald, secondary: mint, error: burgundy);
+  ThemeData _theme(Brightness brightness) {
+    final scheme = ColorScheme.fromSeed(
+      seedColor: emerald,
+      brightness: brightness,
+    ).copyWith(
+      primary: emerald,
+      secondary: mint,
+      error: burgundy,
+    );
+
     return ThemeData(
       useMaterial3: true,
-      brightness: b,
-      colorScheme: cs,
+      brightness: brightness,
+      colorScheme: scheme,
       fontFamily: 'Cairo',
-      cardTheme: CardTheme(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), elevation: 1),
-      inputDecorationTheme: InputDecorationTheme(border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)), filled: true),
+      scaffoldBackgroundColor:
+          brightness == Brightness.light ? const Color(0xFFF6F9FA) : const Color(0xFF101719),
+      appBarTheme: const AppBarTheme(centerTitle: true),
+      cardTheme: CardThemeData(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        elevation: 1,
+        margin: const EdgeInsets.symmetric(vertical: 5),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+        filled: true,
+      ),
     );
   }
 
   @override
-  Widget build(BuildContext c) => AnimatedBuilder(
-        animation: store,
-        builder: (_, __) => MaterialApp(
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: store,
+      builder: (_, __) {
+        return MaterialApp(
           debugShowCheckedModeBanner: false,
-          title: 'DainPay',
-          theme: theme(Brightness.light),
-          darkTheme: theme(Brightness.dark),
+          title: appTitle,
+          theme: _theme(Brightness.light),
+          darkTheme: _theme(Brightness.dark),
           themeMode: store.dark ? ThemeMode.dark : ThemeMode.light,
-          home: HomePage(store: store),
-        ),
-      );
+          home: Directionality(
+            textDirection: TextDirection.rtl,
+            child: HomePage(store: store),
+          ),
+        );
+      },
+    );
+  }
 }
+
+// -----------------------------------------------------------------------------
+// Logo & Home Component
+// -----------------------------------------------------------------------------
 
 class Logo extends StatelessWidget {
   const Logo({super.key});
 
   @override
-  Widget build(BuildContext c) => Container(
-        width: 42,
-        height: 42,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(color: emerald, borderRadius: BorderRadius.circular(13)),
-        child: const Text('DP', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900)),
-      );
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(colors: [emerald, mint]),
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: const [
+          BoxShadow(blurRadius: 8, offset: Offset(0, 3), color: Color(0x22000000)),
+        ],
+      ),
+      child: const Text(
+        'DP',
+        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16),
+      ),
+    );
+  }
 }
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key, required this.store});
+
   final Store store;
 
   @override
@@ -393,80 +910,286 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  String q = '', filter = 'all';
-  int taps = 0;
-  DateTime? last;
+  String query = '';
+  String filter = 'all';
 
-  void hidden() {
-    final n = DateTime.now();
-    if (last == null || n.difference(last!).inSeconds > 2) taps = 0;
-    last = n;
-    if (++taps == 3) {
+  int taps = 0;
+  DateTime? lastTap;
+
+  void hiddenAdmin() {
+    final now = DateTime.now();
+    if (lastTap == null || now.difference(lastTap!).inMilliseconds > 2000) {
       taps = 0;
-      showDialog(context: context, builder: (_) => AdminGate(store: widget.store));
+    }
+    lastTap = now;
+    taps++;
+
+    if (taps >= 3) {
+      taps = 0;
+      showDialog(
+        context: context,
+        builder: (_) => AdminGate(store: widget.store),
+      );
     }
   }
 
-  @override
-  Widget build(BuildContext c) {
-    final s = widget.store;
-    final list = s.customers.where((x) {
-      final b = s.balance(x.id);
-      return (q.isEmpty || x.name.contains(q) || x.phone.contains(q)) && (filter == 'all' || filter == 'debt' && b > 0 || filter == 'paid' && b <= 0);
-    }).toList()..sort((a, b) => s.balance(b.id).compareTo(s.balance(a.id)));
-    final total = s.customers.fold(0, (a, x) => a + max(0, s.balance(x.id)));
+  Future<void> refresh() async {
+    await widget.store.pullCloud();
+    if (mounted) setState(() {});
+  }
 
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        appBar: AppBar(
-          leading: const Padding(padding: EdgeInsets.all(8), child: Logo()),
-          title: GestureDetector(onTap: hidden, child: Text(s.shop, style: const TextStyle(fontWeight: FontWeight.w900))),
-          actions: [IconButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => SettingsPage(store: s))), icon: const Icon(Icons.settings_outlined))],
+  @override
+  Widget build(BuildContext context) {
+    final store = widget.store;
+
+    final filtered = store.customers.where((customer) {
+      final balance = store.balance(customer.id);
+      final normalizedQuery = _digits(query);
+
+      final matchesSearch = query.isEmpty ||
+          customer.name.contains(query) ||
+          customer.phone.contains(query) ||
+          _digits(customer.phone).contains(normalizedQuery);
+
+      final matchesFilter = filter == 'all' ||
+          (filter == 'debt' && balance > 0) ||
+          (filter == 'paid' && balance <= 0);
+
+      return matchesSearch && matchesFilter;
+    }).toList()
+      ..sort((a, b) => store.balance(b.id).compareTo(store.balance(a.id)));
+
+    final total = store.customers.fold<int>(
+      0,
+      (sum, customer) => sum + max(0, store.balance(customer.id)),
+    );
+
+    return Scaffold(
+      appBar: AppBar(
+        leading: const Padding(padding: EdgeInsets.all(8), child: Logo()),
+        title: GestureDetector(
+          onTap: hiddenAdmin,
+          child: Text(store.shop, style: const TextStyle(fontWeight: FontWeight.w900)),
         ),
-        body: ListView(
+        actions: [
+          // التعديل 2: إضافة زر الوصول السريع للتسجيل الصوتي في الواجهة
+          IconButton(
+            tooltip: 'المسودات الصوتية',
+            icon: const Icon(Icons.mic_rounded, color: emerald),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => VoiceDraftsPage(store: store)),
+              );
+            },
+          ),
+          if (store.syncing)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 8),
+              child: Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            ),
+          IconButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => SettingsPage(store: store)),
+              );
+            },
+            icon: const Icon(Icons.settings_outlined),
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: refresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(12),
           children: [
+            if (!store.firebaseReady)
+              Card(
+                color: burgundy.withOpacity(.10),
+                child: ListTile(
+                  leading: const Icon(Icons.cloud_off, color: burgundy),
+                  title: const Text('Firebase غير متصل'),
+                  subtitle: const Text('البيانات المحلية ما زالت تعمل، وستتم المزامنة عند توفر الخدمة.'),
+                  trailing: IconButton(
+                    onPressed: store.connectFirebase,
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ),
+              ),
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Row(
                   children: [
-                    Expanded(child: Column(children: [const Text('إجمالي المتبقي'), Text(money(total), style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w900))])),
-                    Expanded(child: Column(children: [const Text('العملاء'), Text('${s.customers.length}', style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w900))])),
+                    Expanded(
+                      child: _Stat(title: 'إجمالي المتبقي', value: money(total), color: burgundy),
+                    ),
+                    Expanded(
+                      child: _Stat(title: 'العملاء', value: '${store.customers.length}', color: emerald),
+                    ),
                   ],
                 ),
               ),
             ),
-            TextField(decoration: const InputDecoration(hintText: 'بحث بالاسم أو الهاتف', prefixIcon: Icon(Icons.search)), onChanged: (v) => setState(() => q = v.trim())),
+            if (store.locked)
+              Card(
+                color: burgundy.withOpacity(.10),
+                child: ListTile(
+                  leading: const Icon(Icons.lock_outline, color: burgundy),
+                  title: const Text('انتهت التجربة', style: TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: const Text('فعّل التطبيق لمواصلة تسجيل العمليات.'),
+                  trailing: TextButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => ActivationPage(store: store)),
+                      );
+                    },
+                    child: const Text('تفعيل'),
+                  ),
+                ),
+              ),
+            TextField(
+              decoration: const InputDecoration(
+                hintText: 'بحث بالاسم أو الهاتف',
+                prefixIcon: Icon(Icons.search),
+              ),
+              onChanged: (value) => setState(() => query = value.trim()),
+            ),
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
               children: [
-                ChoiceChip(label: const Text('الكل'), selected: filter == 'all', onSelected: (_) => setState(() => filter = 'all')),
-                ChoiceChip(label: const Text('عليهم دين'), selected: filter == 'debt', onSelected: (_) => setState(() => filter = 'debt')),
-                ChoiceChip(label: const Text('مسدد'), selected: filter == 'paid', onSelected: (_) => setState(() => filter = 'paid')),
+                ChoiceChip(
+                  label: const Text('الكل'),
+                  selected: filter == 'all',
+                  onSelected: (_) => setState(() => filter = 'all'),
+                ),
+                ChoiceChip(
+                  label: const Text('عليهم دَين'),
+                  selected: filter == 'debt',
+                  onSelected: (_) => setState(() => filter = 'debt'),
+                ),
+                ChoiceChip(
+                  label: const Text('مسدد'),
+                  selected: filter == 'paid',
+                  onSelected: (_) => setState(() => filter = 'paid'),
+                ),
               ],
             ),
-            ...list.map(
-              (x) => Card(
-                child: ListTile(
-                  onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => CustomerPage(store: s, customer: x))),
-                  leading: CircleAvatar(child: Text(x.name.isEmpty ? '؟' : x.name.substring(0, 1))),
-                  title: Text(x.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text('${x.phone}\n${s.risk(x.id)} • دين ${money(s.debts(x.id))} • مسدد ${money(s.paid(x.id))}'),
-                  isThreeLine: true,
-                  trailing: Text(money(s.balance(x.id)), style: const TextStyle(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 4),
+            if (filtered.isEmpty)
+              const Card(
+                child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: Text('لا توجد نتائج')),
                 ),
               ),
-            ),
+            ...filtered.map((customer) {
+              final customerBalance = store.balance(customer.id);
+              return Card(
+                child: ListTile(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => CustomerPage(store: store, customer: customer),
+                      ),
+                    );
+                  },
+                  leading: CircleAvatar(
+                    child: Text(
+                      customer.name.trim().isEmpty ? '؟' : customer.name.trim().characters.first,
+                    ),
+                  ),
+                  title: Text(customer.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text(
+                    '${customer.phone}\n'
+                    '${store.risk(customer.id)} • '
+                    'دَين ${money(store.debts(customer.id))} • '
+                    'مسدد ${money(store.paid(customer.id))}',
+                  ),
+                  isThreeLine: true,
+                  trailing: Text(
+                    money(customerBalance),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      color: customerBalance > 0 ? burgundy : mint,
+                    ),
+                  ),
+                ),
+              );
+            }),
           ],
         ),
-        floatingActionButton: FloatingActionButton.extended(
-          onPressed: s.locked ? () => Navigator.push(c, MaterialPageRoute(builder: (_) => ActivationPage(store: s))) : () => Navigator.push(c, MaterialPageRoute(builder: (_) => AddCustomerPage(store: s))),
-          icon: Icon(s.locked ? Icons.lock : Icons.person_add_alt_1),
-          label: Text(s.locked ? 'التفعيل' : 'عميل جديد'),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: store.locked
+            ? () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => ActivationPage(store: store)),
+                );
+              }
+            : () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => AddCustomerPage(store: store)),
+                );
+              },
+        icon: Icon(store.locked ? Icons.lock : Icons.person_add_alt_1),
+        label: Text(store.locked ? 'التفعيل' : 'عميل جديد'),
+      ),
+    );
+  }
+}
+
+class _Stat extends StatelessWidget {
+  const _Stat({required this.title, required this.value, required this.color});
+
+  final String title;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text(title),
+        Text(
+          value,
+          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: color),
         ),
+      ],
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Form, Customer, Transactions, Voice & Admin Pages
+// -----------------------------------------------------------------------------
+
+class PageForm extends StatelessWidget {
+  const PageForm({super.key, required this.title, required this.children});
+
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(title)),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: children.map((widget) => Padding(padding: const EdgeInsets.only(bottom: 12), child: widget)).toList(),
       ),
     );
   }
@@ -474,6 +1197,7 @@ class _HomePageState extends State<HomePage> {
 
 class AddCustomerPage extends StatefulWidget {
   const AddCustomerPage({super.key, required this.store});
+
   final Store store;
 
   @override
@@ -481,109 +1205,204 @@ class AddCustomerPage extends StatefulWidget {
 }
 
 class _AddCustomerPageState extends State<AddCustomerPage> {
-  final n = TextEditingController(), p = TextEditingController(), l = TextEditingController();
+  final name = TextEditingController();
+  final phone = TextEditingController();
+  final limit = TextEditingController();
+  bool busy = false;
 
   @override
   void dispose() {
-    n.dispose();
-    p.dispose();
-    l.dispose();
+    name.dispose();
+    phone.dispose();
+    limit.dispose();
     super.dispose();
   }
 
   Future<void> save() async {
-    if (n.text.trim().isEmpty) return;
-    await widget.store.saveCustomer(Customer(id: makeId(), name: n.text.trim(), phone: p.text.trim(), limitCents: parseCents(l.text)));
-    if (mounted) Navigator.pop(context);
+    if (busy) return;
+
+    final customerName = name.text.trim();
+    if (customerName.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('أدخل اسم العميل')),
+      );
+      return;
+    }
+
+    setState(() => busy = true);
+
+    final ok = await widget.store.saveCustomer(
+      Customer(
+        id: makeId(),
+        name: customerName,
+        phone: phone.text.trim(),
+        limitCents: parseCents(limit.text),
+      ),
+    );
+
+    if (!mounted) return;
+    setState(() => busy = false);
+
+    if (ok) {
+      Navigator.pop(context);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('العميل موجود مسبقاً بنفس الاسم والهاتف')),
+      );
+    }
   }
 
   @override
-  Widget build(BuildContext c) => PageForm(
-        title: 'إضافة عميل',
-        children: [
-          TextField(controller: n, decoration: const InputDecoration(labelText: 'اسم العميل')),
-          TextField(controller: p, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'رقم الهاتف')),
-          TextField(controller: l, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'السقف الائتماني اختياري')),
-          FilledButton(onPressed: save, child: const Text('حفظ العميل')),
-        ],
-      );
-}
-
-class PageForm extends StatelessWidget {
-  const PageForm({super.key, required this.title, required this.children});
-  final String title;
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext c) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: Scaffold(
-          appBar: AppBar(title: Text(title)),
-          body: ListView(
-            padding: const EdgeInsets.all(16),
-            children: children.map((x) => Padding(padding: const EdgeInsets.only(bottom: 12), child: x)).toList(),
-          ),
+  Widget build(BuildContext context) {
+    return PageForm(
+      title: 'إضافة عميل',
+      children: [
+        TextField(
+          controller: name,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(labelText: 'اسم العميل'),
         ),
-      );
+        TextField(
+          controller: phone,
+          keyboardType: TextInputType.phone,
+          decoration: const InputDecoration(labelText: 'رقم الهاتف'),
+        ),
+        TextField(
+          controller: limit,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(labelText: 'السقف الائتماني اختياري'),
+        ),
+        FilledButton(
+          onPressed: busy ? null : save,
+          child: Text(busy ? 'جارٍ الحفظ...' : 'حفظ العميل'),
+        ),
+      ],
+    );
+  }
 }
 
 class CustomerPage extends StatelessWidget {
   const CustomerPage({super.key, required this.store, required this.customer});
+
   final Store store;
   final Customer customer;
 
-  Future<void> openWa(BuildContext c) async {
-    final ok = await wa(customer.phone, store.whatsappMessage.replaceAll('[الاسم]', customer.name).replaceAll('[المبلغ]', money(store.balance(customer.id))));
-    if (!ok && c.mounted) ScaffoldMessenger.of(c).showSnackBar(const SnackBar(content: Text('تعذر فتح واتساب')));
+  Future<void> openWhatsApp(BuildContext context) async {
+    final text = store.whatsappMessage
+        .replaceAll('[الاسم]', customer.name)
+        .replaceAll('[المبلغ]', money(store.balance(customer.id)));
+
+    final ok = await launchWhatsApp(customer.phone, text);
+
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تعذر فتح واتساب')),
+      );
+    }
   }
 
   @override
-  Widget build(BuildContext c) {
-    final rows = store.transactions.where((t) => t.customerId == customer.id).toList()..sort((a, b) => b.date.compareTo(a.date));
+  Widget build(BuildContext context) {
+    final rows = store.transactions
+        .where((t) => t.customerId == customer.id)
+        .toList()
+      ..sort((a, b) => b.date.compareTo(a.date));
 
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        appBar: AppBar(title: Text(customer.name)),
-        body: ListView(
-          padding: const EdgeInsets.all(12),
-          children: [
-            Card(
+    return Scaffold(
+      appBar: AppBar(title: Text(customer.name)),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                children: [
+                  const Icon(Icons.account_balance_wallet_rounded, size: 36, color: emerald),
+                  Text(
+                    money(store.balance(customer.id)),
+                    style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900),
+                  ),
+                  Text(
+                    'الدَين ${money(store.debts(customer.id))} • '
+                    'المسدد ${money(store.paid(customer.id))}',
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: () => openWhatsApp(context),
+                        icon: const Icon(Icons.chat_rounded),
+                        label: const Text('واتساب'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          final ok = await makePhoneCall(customer.phone);
+                          if (!ok && context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('تعذر إجراء الاتصال')),
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.phone_rounded),
+                        label: const Text('اتصال'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (rows.isEmpty)
+            const Card(
               child: Padding(
-                padding: const EdgeInsets.all(18),
-                child: Column(
-                  children: [
-                    const Icon(Icons.account_balance_wallet_rounded, size: 34, color: emerald),
-                    Text(money(store.balance(customer.id)), style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
-                    Text('الدين ${money(store.debts(customer.id))} • المسدد ${money(store.paid(customer.id))}'),
-                    Wrap(
-                      spacing: 8,
-                      children: [
-                        FilledButton.icon(onPressed: () => openWa(c), icon: const Icon(Icons.chat_rounded), label: const Text('واتساب')),
-                        OutlinedButton.icon(onPressed: () => launchUrl(Uri.parse('tel:${customer.phone}')), icon: const Icon(Icons.phone_rounded), label: const Text('اتصال')),
-                      ],
-                    ),
-                  ],
+                padding: EdgeInsets.all(24),
+                child: Center(child: Text('لا توجد عمليات بعد')),
+              ),
+            ),
+          ...rows.map(
+            (transaction) => Card(
+              child: ListTile(
+                leading: Icon(
+                  transaction.type == 'debt' ? Icons.arrow_downward_rounded : Icons.arrow_upward_rounded,
+                  color: transaction.type == 'debt' ? burgundy : mint,
+                ),
+                title: Text(transaction.type == 'debt' ? 'دَين' : 'تسديد'),
+                subtitle: Text(
+                  '${dateText(transaction.date)} ${timeText(transaction.date)}'
+                  '${transaction.note.isEmpty ? '' : ' • ${transaction.note}'}',
+                ),
+                trailing: Text(
+                  money(transaction.amountCents),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    color: transaction.type == 'debt' ? burgundy : mint,
+                  ),
                 ),
               ),
             ),
-            ...rows.map(
-              (t) => Card(
-                child: ListTile(
-                  leading: Icon(t.type == 'debt' ? Icons.arrow_downward_rounded : Icons.arrow_upward_rounded, color: t.type == 'debt' ? burgundy : mint),
-                  title: Text(t.type == 'debt' ? 'دَين' : 'تسديد'),
-                  subtitle: Text('${dateText(t.date)} ${timeText(t.date)}${t.note.isEmpty ? '' : ' • ${t.note}'}'),
-                  trailing: Text(money(t.amountCents), style: TextStyle(fontWeight: FontWeight.w900, color: t.type == 'debt' ? burgundy : mint)),
-                ),
-              ),
-            ),
-          ],
-        ),
-        floatingActionButton: FloatingActionButton.extended(
-          onPressed: store.locked ? () => Navigator.push(c, MaterialPageRoute(builder: (_) => ActivationPage(store: store))) : () => Navigator.push(c, MaterialPageRoute(builder: (_) => AddTransactionPage(store: store, customer: customer))),
-          icon: Icon(store.locked ? Icons.lock : Icons.swap_horiz_rounded),
-          label: Text(store.locked ? 'التفعيل' : 'عملية جديدة'),
-        ),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: store.locked
+            ? () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => ActivationPage(store: store)),
+                );
+              }
+            : () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => AddTransactionPage(store: store, customer: customer),
+                  ),
+                );
+              },
+        icon: Icon(store.locked ? Icons.lock : Icons.swap_horiz_rounded),
+        label: Text(store.locked ? 'التفعيل' : 'عملية جديدة'),
       ),
     );
   }
@@ -591,6 +1410,7 @@ class CustomerPage extends StatelessWidget {
 
 class AddTransactionPage extends StatefulWidget {
   const AddTransactionPage({super.key, required this.store, required this.customer});
+
   final Store store;
   final Customer customer;
 
@@ -599,46 +1419,105 @@ class AddTransactionPage extends StatefulWidget {
 }
 
 class _AddTransactionPageState extends State<AddTransactionPage> {
-  final a = TextEditingController(), n = TextEditingController();
+  final amount = TextEditingController();
+  final note = TextEditingController();
   String type = 'debt';
+  bool busy = false;
 
   @override
   void dispose() {
-    a.dispose();
-    n.dispose();
+    amount.dispose();
+    note.dispose();
     super.dispose();
   }
 
   Future<void> save() async {
-    final cents = parseCents(a.text);
-    if (cents <= 0) return;
+    if (busy) return;
+
+    final cents = parseCents(amount.text);
     final current = widget.store.balance(widget.customer.id);
-    if (type == 'debt' && widget.customer.limitCents > 0 && current + cents > widget.customer.limitCents) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('العملية تتجاوز السقف الائتماني')));
+
+    if (cents <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('أدخل مبلغاً صحيحاً أكبر من صفر')),
+      );
       return;
     }
-    await widget.store.saveTx(Tx(id: makeId(), customerId: widget.customer.id, type: type, amountCents: cents, date: DateTime.now(), note: n.text.trim()));
-    if (mounted) Navigator.pop(context);
+
+    if (type == 'payment' && cents > current) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('قيمة التسديد أكبر من المتبقي على العميل')),
+      );
+      return;
+    }
+
+    if (type == 'debt' &&
+        widget.customer.limitCents > 0 &&
+        current + cents > widget.customer.limitCents) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('العملية تتجاوز السقف الائتماني')),
+      );
+      return;
+    }
+
+    setState(() => busy = true);
+
+    final saved = await widget.store.saveTx(
+      Tx(
+        id: makeId(),
+        customerId: widget.customer.id,
+        type: type,
+        amountCents: cents,
+        date: DateTime.now(),
+        note: note.text.trim(),
+      ),
+    );
+
+    if (!mounted) return;
+    setState(() => busy = false);
+
+    if (saved) {
+      Navigator.pop(context);
+    }
   }
 
   @override
-  Widget build(BuildContext c) => PageForm(
-        title: type == 'debt' ? 'إضافة دَين' : 'تسجيل تسديد',
-        children: [
-          SegmentedButton<String>(
-            segments: const [ButtonSegment(value: 'debt', label: Text('دَين')), ButtonSegment(value: 'payment', label: Text('تسديد'))],
-            selected: {type},
-            onSelectionChanged: (v) => setState(() => type = v.first),
-          ),
-          TextField(controller: a, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'المبلغ')),
-          TextField(controller: n, decoration: const InputDecoration(labelText: 'البيان / الملاحظات')),
-          FilledButton(onPressed: save, child: const Text('حفظ العملية')),
-        ],
-      );
+  Widget build(BuildContext context) {
+    return PageForm(
+      title: type == 'debt' ? 'إضافة دَين' : 'تسجيل تسديد',
+      children: [
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'debt', label: Text('دَين'), icon: Icon(Icons.arrow_downward)),
+            ButtonSegment(value: 'payment', label: Text('تسديد'), icon: Icon(Icons.arrow_upward)),
+          ],
+          selected: {type},
+          onSelectionChanged: (values) {
+            if (values.isEmpty) return;
+            setState(() => type = values.first);
+          },
+        ),
+        TextField(
+          controller: amount,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(labelText: 'المبلغ', hintText: 'مثال: 150 أو 150.50'),
+        ),
+        TextField(
+          controller: note,
+          decoration: const InputDecoration(labelText: 'البيان / الملاحظات'),
+        ),
+        FilledButton(
+          onPressed: busy ? null : save,
+          child: Text(busy ? 'جارٍ الحفظ...' : 'حفظ العملية'),
+        ),
+      ],
+    );
+  }
 }
 
 class VoiceDraftsPage extends StatefulWidget {
   const VoiceDraftsPage({super.key, required this.store});
+
   final Store store;
 
   @override
@@ -648,26 +1527,55 @@ class VoiceDraftsPage extends StatefulWidget {
 class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
   final speech = stt.SpeechToText();
   bool listening = false;
+  bool initializing = false;
   String live = '';
 
-  double? amount(String t) {
-    final m = RegExp(r'(\d+(?:[.,]\d+)?)').firstMatch(t);
-    if (m != null) return double.tryParse(m.group(1)!.replaceAll(',', '.'));
-    const w = {'مية': 100, 'مائة': 100, 'مئة': 100, 'ألف': 1000, 'الف': 1000, 'عشرة': 10, 'عشرين': 20, 'ثلاثين': 30, 'أربعين': 40, 'خمسين': 50, 'ستين': 60, 'سبعين': 70, 'ثمانين': 80, 'تسعين': 90};
-    for (final e in w.entries) {
-      if (t.contains(e.key)) return e.value.toDouble();
+  int? amountCentsFromText(String text) {
+    final normalized = _digits(text);
+    final match = RegExp(r'(\d+(?:[.,]\d+)?)').firstMatch(normalized);
+
+    if (match != null) {
+      return parseCents(match.group(1)!);
     }
+
+    const words = {
+      'مائة': 100,
+      'مئة': 100,
+      'مية': 100,
+      'ألف': 1000,
+      'الف': 1000,
+      'عشرة': 10,
+      'عشرين': 20,
+      'ثلاثين': 30,
+      'أربعين': 40,
+      'خمسين': 50,
+      'ستين': 60,
+      'سبعين': 70,
+      'ثمانين': 80,
+      'تسعين': 90,
+    };
+
+    for (final entry in words.entries) {
+      if (text.contains(entry.key)) {
+        return entry.value * 100;
+      }
+    }
+
     return null;
   }
 
-  String findCustomer(String t) {
-    for (final c in widget.store.customers) {
-      if (t.contains(c.name)) return c.id;
+  String findCustomer(String text) {
+    for (final customer in widget.store.customers) {
+      if (text.contains(customer.name)) {
+        return customer.id;
+      }
     }
     return '';
   }
 
   Future<void> record() async {
+    if (initializing) return;
+
     if (listening) {
       try {
         await speech.stop();
@@ -675,83 +1583,136 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       if (mounted) setState(() => listening = false);
       return;
     }
+
+    initializing = true;
+
     try {
-      final ok = await speech.initialize(
-        onStatus: (x) {
+      final available = await speech.initialize(
+        onStatus: (status) {
           if (!mounted) return;
-          if (x == 'notListening') setState(() => listening = false);
+          if (status == 'notListening' || status == 'done') {
+            setState(() => listening = false);
+          }
         },
-        onError: (_) {
-          if (mounted) setState(() => listening = false);
+        onError: (error) {
+          debugPrint('Speech error: $error');
+          if (!mounted) return;
+          setState(() => listening = false);
         },
       );
-      if (!ok) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون')));
+
+      if (!available) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون')),
+          );
+        }
         return;
       }
+
       if (!mounted) return;
       setState(() => listening = true);
+
       await speech.listen(
         localeId: 'ar-LY',
         partialResults: true,
-        onResult: (r) {
+        onResult: (result) async {
           if (!mounted) return;
-          setState(() => live = r.recognizedWords);
-          if (r.finalResult) {
-            final text = r.recognizedWords.trim();
-            if (text.isNotEmpty) {
-              widget.store.voiceDrafts.insert(0, VoiceDraft(id: makeId(), text: text, date: DateTime.now(), customerId: findCustomer(text), amountCents: ((amount(text) ?? 0) * 100).round(), note: text));
-              widget.store.saveLocal();
-            }
-            if (mounted) setState(() => listening = false);
+          setState(() => live = result.recognizedWords);
+
+          if (!result.finalResult) return;
+
+          final text = result.recognizedWords.trim();
+          if (text.isNotEmpty) {
+            widget.store.voiceDrafts.insert(
+              0,
+              VoiceDraft(
+                id: makeId(),
+                text: text,
+                date: DateTime.now(),
+                customerId: findCustomer(text),
+                amountCents: amountCentsFromText(text) ?? 0,
+                note: text,
+              ),
+            );
+            await widget.store.saveLocal();
+            widget.store.safeNotify();
           }
+
+          if (mounted) setState(() => listening = false);
         },
       );
     } catch (e) {
+      debugPrint('Speech start error: $e');
       if (mounted) {
         setState(() => listening = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ في التسجيل: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر تشغيل التسجيل الصوتي')),
+        );
       }
+    } finally {
+      initializing = false;
     }
   }
 
   @override
   void dispose() {
-    speech.stop();
+    try {
+      speech.stop();
+    } catch (_) {}
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext c) {
-    final d = widget.store.voiceDrafts;
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        appBar: AppBar(title: const Text('المسودات الصوتية')),
-        body: ListView(
-          padding: const EdgeInsets.all(12),
-          children: [
-            Card(
+  Widget build(BuildContext context) {
+    final drafts = widget.store.voiceDrafts;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('المسودات الصوتية')),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Card(
+            child: ListTile(
+              onTap: record,
+              leading: Icon(
+                listening ? Icons.stop_circle : Icons.mic_rounded,
+                color: listening ? burgundy : emerald,
+              ),
+              title: Text(listening ? 'جارٍ الاستماع...' : 'تسجيل عملية صوتية'),
+              subtitle: Text(live.isEmpty ? 'مثال: محمد 150 بضاعة' : live),
+            ),
+          ),
+          if (drafts.isEmpty)
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: Text('لا توجد مسودات صوتية')),
+              ),
+            ),
+          ...drafts.map((draft) {
+            final customer = widget.store.customers.where((c) => c.id == draft.customerId).firstOrNull;
+            return Card(
               child: ListTile(
-                onTap: record,
-                leading: Icon(listening ? Icons.stop_circle : Icons.mic_rounded, color: listening ? burgundy : emerald),
-                title: Text(listening ? 'جارٍ الاستماع...' : 'تسجيل عملية صوتية'),
-                subtitle: Text(live.isEmpty ? 'مثال: محمد 150 بضاعة' : live),
+                title: Text(customer?.name ?? 'عميل غير محدد'),
+                subtitle: Text('${draft.text}\nالمبلغ: ${money(draft.amountCents)}'),
+                isThreeLine: true,
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => VoiceReviewPage(store: widget.store, draft: draft),
+                    ),
+                  );
+                },
               ),
-            ),
-            ...d.map(
-              (x) => Card(
-                child: ListTile(
-                  title: Text(x.customerId.isEmpty ? 'عميل غير محدد' : widget.store.customers.firstWhere((c) => c.id == x.customerId, orElse: () => Customer(id: '', name: 'غير معروف', phone: '')).name),
-                  subtitle: Text('${x.text}\nالمبلغ: ${money(x.amountCents)}'),
-                  isThreeLine: true,
-                  onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => VoiceReviewPage(store: widget.store, draft: x))),
-                ),
-              ),
-            ),
-          ],
-        ),
-        floatingActionButton: FloatingActionButton(onPressed: record, child: Icon(listening ? Icons.stop : Icons.mic)),
+            );
+          }),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: record,
+        child: Icon(listening ? Icons.stop : Icons.mic),
       ),
     );
   }
@@ -759,6 +1720,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
 
 class VoiceReviewPage extends StatefulWidget {
   const VoiceReviewPage({super.key, required this.store, required this.draft});
+
   final Store store;
   final VoiceDraft draft;
 
@@ -767,64 +1729,142 @@ class VoiceReviewPage extends StatefulWidget {
 }
 
 class _VoiceReviewPageState extends State<VoiceReviewPage> {
-  late TextEditingController a, n;
-  String customerId = '', type = 'debt';
+  late final TextEditingController amount;
+  late final TextEditingController note;
+  String customerId = '';
+  String type = 'debt';
+  bool busy = false;
 
   @override
   void initState() {
     super.initState();
-    a = TextEditingController(text: widget.draft.amountCents > 0 ? (widget.draft.amountCents / 100).toStringAsFixed(2) : '');
-    n = TextEditingController(text: widget.draft.note);
+    amount = TextEditingController(
+      text: widget.draft.amountCents > 0
+          ? '${widget.draft.amountCents ~/ 100}.${(widget.draft.amountCents % 100).toString().padLeft(2, '0')}'
+          : '',
+    );
+    note = TextEditingController(text: widget.draft.note);
     customerId = widget.draft.customerId;
   }
 
   @override
   void dispose() {
-    a.dispose();
-    n.dispose();
+    amount.dispose();
+    note.dispose();
     super.dispose();
   }
 
   Future<void> approve() async {
-    final cents = parseCents(a.text);
-    final matches = widget.store.customers.where((x) => x.id == customerId);
-    if (matches.isEmpty || cents <= 0) return;
-    final c = matches.first;
-    if (type == 'debt' && c.limitCents > 0 && widget.store.balance(c.id) + cents > c.limitCents) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('العملية تتجاوز السقف الائتماني')));
+    if (busy) return;
+
+    final cents = parseCents(amount.text);
+    final customer = widget.store.customers.where((c) => c.id == customerId).firstOrNull;
+
+    if (customer == null || cents <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('اختر العميل وأدخل مبلغاً صحيحاً')),
+      );
       return;
     }
-    await widget.store.saveTx(Tx(id: makeId(), customerId: c.id, type: type, amountCents: cents, date: DateTime.now(), note: n.text.trim()));
-    widget.store.voiceDrafts.removeWhere((x) => x.id == widget.draft.id);
+
+    final current = widget.store.balance(customer.id);
+
+    if (type == 'payment' && cents > current) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('قيمة التسديد أكبر من المتبقي')),
+      );
+      return;
+    }
+
+    if (type == 'debt' && customer.limitCents > 0 && current + cents > customer.limitCents) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('العملية تتجاوز السقف الائتماني')),
+      );
+      return;
+    }
+
+    setState(() => busy = true);
+
+    final saved = await widget.store.saveTx(
+      Tx(
+        id: makeId(),
+        customerId: customer.id,
+        type: type,
+        amountCents: cents,
+        date: DateTime.now(),
+        note: note.text.trim(),
+      ),
+    );
+
+    if (!saved) {
+      if (mounted) setState(() => busy = false);
+      return;
+    }
+
+    widget.store.voiceDrafts.removeWhere((draft) => draft.id == widget.draft.id);
     await widget.store.saveLocal();
-    if (mounted) Navigator.pop(context);
+
+    if (!mounted) return;
+    Navigator.pop(context);
   }
 
   @override
-  Widget build(BuildContext c) => PageForm(
-        title: 'مراجعة التسجيل الصوتي',
-        children: [
-          Card(child: Padding(padding: const EdgeInsets.all(14), child: Text(widget.draft.text, style: const TextStyle(fontWeight: FontWeight.bold)))),
-          DropdownButtonFormField<String>(
-            value: customerId.isEmpty ? null : customerId,
-            decoration: const InputDecoration(labelText: 'الزبون'),
-            items: widget.store.customers.map((x) => DropdownMenuItem(value: x.id, child: Text(x.name))).toList(),
-            onChanged: (v) => setState(() => customerId = v ?? ''),
+  Widget build(BuildContext context) {
+    final validId = widget.store.customers.any((c) => c.id == customerId) ? customerId : null;
+
+    return PageForm(
+      title: 'مراجعة التسجيل الصوتي',
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Text(
+              widget.draft.text,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
           ),
-          SegmentedButton<String>(
-            segments: const [ButtonSegment(value: 'debt', label: Text('دَين')), ButtonSegment(value: 'payment', label: Text('تسديد'))],
-            selected: {type},
-            onSelectionChanged: (v) => setState(() => type = v.first),
-          ),
-          TextField(controller: a, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'المبلغ')),
-          TextField(controller: n, maxLines: 2, decoration: const InputDecoration(labelText: 'البيان')),
-          FilledButton(onPressed: approve, child: const Text('اعتماد وحفظ')),
-        ],
-      );
+        ),
+        DropdownButtonFormField<String>(
+          value: validId,
+          decoration: const InputDecoration(labelText: 'العميل'),
+          items: widget.store.customers
+              .map((customer) => DropdownMenuItem(value: customer.id, child: Text(customer.name)))
+              .toList(),
+          onChanged: (value) => setState(() => customerId = value ?? ''),
+        ),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'debt', label: Text('دَين')),
+            ButtonSegment(value: 'payment', label: Text('تسديد')),
+          ],
+          selected: {type},
+          onSelectionChanged: (values) {
+            if (values.isEmpty) return;
+            setState(() => type = values.first);
+          },
+        ),
+        TextField(
+          controller: amount,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(labelText: 'المبلغ'),
+        ),
+        TextField(
+          controller: note,
+          maxLines: 2,
+          decoration: const InputDecoration(labelText: 'البيان'),
+        ),
+        FilledButton(
+          onPressed: busy ? null : approve,
+          child: Text(busy ? 'جارٍ الاعتماد...' : 'اعتماد وحفظ'),
+        ),
+      ],
+    );
+  }
 }
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key, required this.store});
+
   final Store store;
 
   @override
@@ -832,59 +1872,117 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  late TextEditingController shop, msg;
+  late final TextEditingController shop;
+  late final TextEditingController message;
+  bool saving = false;
 
   @override
   void initState() {
     super.initState();
     shop = TextEditingController(text: widget.store.shop);
-    msg = TextEditingController(text: widget.store.whatsappMessage);
+    message = TextEditingController(text: widget.store.whatsappMessage);
   }
 
   @override
   void dispose() {
     shop.dispose();
-    msg.dispose();
+    message.dispose();
     super.dispose();
   }
 
   Future<void> save() async {
-    widget.store.shop = shop.text.trim().isEmpty ? 'DainPay — دَيْن' : shop.text.trim();
-    widget.store.whatsappMessage = msg.text.trim();
+    if (saving) return;
+
+    setState(() => saving = true);
+
+    widget.store.shop = shop.text.trim().isEmpty ? appTitle : shop.text.trim();
+    widget.store.whatsappMessage = message.text.trim().isEmpty
+        ? 'السلام عليكم [الاسم]، تذكير لطيف بخصوص المتبقي عليكم قدره [المبلغ].'
+        : message.text.trim();
+
     await widget.store.save();
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ الإعدادات')));
+
+    if (!mounted) return;
+    setState(() => saving = false);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('تم حفظ الإعدادات')),
+    );
   }
 
   @override
-  Widget build(BuildContext c) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: Scaffold(
-          appBar: AppBar(title: const Text('الإعدادات')),
-          body: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              TextField(controller: shop, decoration: const InputDecoration(labelText: 'اسم المحل / النشاط')),
-              SwitchListTile(
-                value: widget.store.dark,
-                onChanged: (v) {
-                  setState(() => widget.store.dark = v);
-                  widget.store.save();
-                },
-                title: const Text('الوضع الداكن'),
-              ),
-              TextField(controller: msg, maxLines: 3, decoration: const InputDecoration(labelText: 'قالب رسالة واتساب')),
-              ListTile(title: const Text('رقم الجهاز'), subtitle: Text(widget.store.deviceId)),
-              FilledButton(onPressed: save, child: const Text('حفظ')),
-              OutlinedButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => VoiceDraftsPage(store: widget.store))), child: const Text('المسودات الصوتية')),
-              OutlinedButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => ActivationPage(store: widget.store))), child: const Text('التفعيل')),
-            ],
+  Widget build(BuildContext context) {
+    final store = widget.store;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('الإعدادات')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          TextField(
+            controller: shop,
+            decoration: const InputDecoration(labelText: 'اسم المحل / النشاط'),
           ),
-        ),
-      );
+          SwitchListTile(
+            value: store.dark,
+            onChanged: (value) async {
+              setState(() => store.dark = value);
+              await store.saveLocal();
+              store.safeNotify();
+            },
+            title: const Text('الوضع الداكن'),
+          ),
+          TextField(
+            controller: message,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'قالب رسالة واتساب',
+              helperText: 'يمكنك استخدام [الاسم] و [المبلغ]',
+            ),
+          ),
+          ListTile(
+            title: const Text('رقم الجهاز'),
+            subtitle: SelectableText(store.deviceId),
+          ),
+          ListTile(
+            title: const Text('حالة Firebase'),
+            subtitle: Text(store.firebaseReady ? 'متصل' : 'غير متصل'),
+            trailing: Icon(
+              store.firebaseReady ? Icons.cloud_done : Icons.cloud_off,
+              color: store.firebaseReady ? mint : burgundy,
+            ),
+          ),
+          FilledButton(
+            onPressed: saving ? null : save,
+            child: Text(saving ? 'جارٍ الحفظ...' : 'حفظ'),
+          ),
+          OutlinedButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => VoiceDraftsPage(store: store)),
+              );
+            },
+            child: const Text('المسودات الصوتية'),
+          ),
+          OutlinedButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => ActivationPage(store: store)),
+              );
+            },
+            child: const Text('التفعيل'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class ActivationPage extends StatefulWidget {
   const ActivationPage({super.key, required this.store});
+
   final Store store;
 
   @override
@@ -901,36 +1999,104 @@ class _ActivationPageState extends State<ActivationPage> {
     super.dispose();
   }
 
-  Future<void> go() async {
+  Future<void> activate() async {
+    if (busy) return;
+
+    if (!widget.store.firebaseReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لا يوجد اتصال بالخدمة حالياً. حاول بعد الاتصال بالإنترنت.')),
+      );
+      return;
+    }
+
+    final entered = code.text.trim();
+    if (entered.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('أدخل كود التفعيل')),
+      );
+      return;
+    }
+
     setState(() => busy = true);
-    final ok = await widget.store.activateCode(code.text);
+    final ok = await widget.store.activateCode(entered);
+
     if (!mounted) return;
     setState(() => busy = false);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok ? 'تم التفعيل الدائم بنجاح' : 'الكود غير صحيح أو مستخدم أو مخصص لجهاز آخر')));
-    if (ok) Navigator.pop(context);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok ? 'تم التفعيل الدائم بنجاح' : 'الكود غير صحيح أو مستخدم أو مخصص لجهاز آخر',
+        ),
+      ),
+    );
+
+    if (ok) {
+      Navigator.pop(context);
+    }
   }
 
   @override
-  Widget build(BuildContext c) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: Scaffold(
-          appBar: AppBar(title: const Text('التفعيل')),
-          body: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              Text(widget.store.activated ? 'التطبيق مفعّل بصفة دائمة' : 'التجربة المجانية: ${widget.store.trialDaysLeft} أيام', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              Text('رقم الجهاز: ${widget.store.deviceId}'),
-              FilledButton.icon(onPressed: () => wa('+218934951072', 'طلب تفعيل DainPay - رقم الجهاز: ${widget.store.deviceId}'), icon: const Icon(Icons.chat), label: const Text('طلب رمز عبر واتساب')),
-              TextField(controller: code, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'كود التفعيل')),
-              FilledButton(onPressed: busy ? null : go, child: Text(busy ? 'جارٍ التحقق...' : 'تفعيل دائم')),
-            ],
+  Widget build(BuildContext context) {
+    final store = widget.store;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('التفعيل')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  const Icon(Icons.verified_rounded, size: 42, color: mint),
+                  const SizedBox(height: 8),
+                  Text(
+                    store.activated
+                        ? 'التطبيق مفعّل بصفة دائمة'
+                        : 'المتبقي من التجربة: ${store.trialDaysLeft} أيام',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  SelectableText('رقم الجهاز: ${store.deviceId}'),
+                ],
+              ),
+            ),
           ),
-        ),
-      );
+          FilledButton.icon(
+            onPressed: () {
+              launchWhatsApp(
+                '+218934951072',
+                'طلب تفعيل DainPay - رقم الجهاز: ${store.deviceId}',
+              );
+            },
+            icon: const Icon(Icons.chat),
+            label: const Text('طلب رمز عبر واتساب'),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: code,
+            keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.done,
+            decoration: const InputDecoration(labelText: 'كود التفعيل'),
+            onSubmitted: (_) => activate(),
+          ),
+          const SizedBox(height: 12),
+          FilledButton(
+            onPressed: busy ? null : activate,
+            child: Text(busy ? 'جارٍ التحقق...' : 'تفعيل دائم'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class AdminGate extends StatefulWidget {
   const AdminGate({super.key, required this.store});
+
   final Store store;
 
   @override
@@ -947,32 +2113,52 @@ class _AdminGateState extends State<AdminGate> {
     super.dispose();
   }
 
-  Future<void> enter() async {
-    setState(() => busy = true);
-    final ok = await widget.store.checkAdmin(pin.text.trim());
-    if (!mounted) return;
-    setState(() => busy = false);
-    if (ok) {
-      Navigator.pop(context);
-      Navigator.push(context, MaterialPageRoute(builder: (_) => AdminPage(store: widget.store)));
+  void enter() {
+    if (busy) return;
+
+    final navigator = Navigator.of(context);
+    final valid = widget.store.checkAdminLocal(pin.text);
+
+    if (valid) {
+      navigator.pop();
+      navigator.push(
+        MaterialPageRoute(builder: (_) => AdminPage(store: widget.store)),
+      );
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('رمز المالك غير صحيح أو لا توجد صلاحية')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('رمز المالك غير صحيح')),
+      );
     }
   }
 
   @override
-  Widget build(BuildContext c) => AlertDialog(
-        title: const Text('لوحة المالك'),
-        content: TextField(controller: pin, obscureText: true, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'رمز المالك')),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
-          FilledButton(onPressed: busy ? null : enter, child: Text(busy ? 'جارٍ التحقق...' : 'دخول')),
-        ],
-      );
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('لوحة المالك'),
+      content: TextField(
+        controller: pin,
+        obscureText: true,
+        keyboardType: TextInputType.number,
+        onSubmitted: (_) => enter(),
+        decoration: const InputDecoration(labelText: 'رمز المالك'),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('إلغاء'),
+        ),
+        FilledButton(
+          onPressed: enter,
+          child: const Text('دخول'),
+        ),
+      ],
+    );
+  }
 }
 
 class AdminPage extends StatefulWidget {
   const AdminPage({super.key, required this.store});
+
   final Store store;
 
   @override
@@ -991,36 +2177,88 @@ class _AdminPageState extends State<AdminPage> {
   }
 
   Future<void> generate() async {
-    if (device.text.trim().isEmpty) return;
+    if (busy) return;
+
+    final target = device.text.trim();
+    if (target.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('أدخل Device ID للعميل')),
+      );
+      return;
+    }
+
+    if (!widget.store.firebaseReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Firebase غير متصل')),
+      );
+      return;
+    }
+
     setState(() => busy = true);
-    final r = await widget.store.generateCode(device.text);
+    final generated = await widget.store.generateCode(target);
+
     if (!mounted) return;
     setState(() {
       busy = false;
-      result = r ?? 'تعذر التوليد';
+      result = generated ?? 'تعذر توليد الرمز';
     });
   }
 
   @override
-  Widget build(BuildContext c) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: Scaffold(
-          appBar: AppBar(title: const Text('إدارة التفعيل')),
-          body: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              TextField(controller: device, decoration: const InputDecoration(labelText: 'Device ID')),
-              FilledButton(onPressed: busy ? null : generate, child: Text(busy ? 'جارٍ التوليد...' : 'توليد رمز')),
-              if (result.isNotEmpty)
-                Card(
-                  child: ListTile(
-                    title: const Text('رمز التفعيل'),
-                    subtitle: Text(result, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
-                    trailing: result.length == 6 ? IconButton(onPressed: () => wa('+218934951072', 'رمز تفعيل DainPay: $result'), icon: const Icon(Icons.send)) : null,
-                  ),
-                ),
-            ],
+  Widget build(BuildContext context) {
+    final store = widget.store;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('إدارة التفعيل')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.admin_panel_settings_outlined),
+              title: const Text('وضع المالك'),
+              subtitle: Text(store.firebaseReady ? 'متصل بـ Firebase' : 'غير متصل بـ Firebase'),
+            ),
           ),
-        ),
-      );
+          TextField(
+            controller: device,
+            decoration: const InputDecoration(
+              labelText: 'Device ID للعميل',
+              hintText: 'مثال: DP-...',
+            ),
+          ),
+          const SizedBox(height: 12),
+          FilledButton(
+            onPressed: busy ? null : generate,
+            child: Text(busy ? 'جارٍ التوليد...' : 'توليد رمز تفعيل'),
+          ),
+          if (result.isNotEmpty)
+            Card(
+              child: ListTile(
+                title: const Text('رمز التفعيل'),
+                subtitle: SelectableText(
+                  result,
+                  style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w900),
+                ),
+                trailing: result.length == 6
+                    ? IconButton(
+                        onPressed: () {
+                          launchWhatsApp(
+                            '+218934951072',
+                            'رمز تفعيل DainPay: $result',
+                          );
+                        },
+                        icon: const Icon(Icons.send),
+                      )
+                    : null,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+extension FirstOrNullExtension<T> on Iterable<T> {
+  T? get firstOrNull => isEmpty ? null : first;
 }

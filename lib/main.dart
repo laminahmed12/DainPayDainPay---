@@ -8,66 +8,1019 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:url_launcher/url_launcher.dart';
 
-const emerald=Color(0xFF0F5C6E), mint=Color(0xFF2EC4B6), burgundy=Color(0xFFE63946);
-Future<void> main()async{WidgetsFlutterBinding.ensureInitialized();try{await Firebase.initializeApp();}catch(e){debugPrint('Firebase init: $e');}final s=await Store.load();await s.connectFirebase();runApp(DainPayApp(store:s));}
-String makeId()=> '${DateTime.now().microsecondsSinceEpoch}_${Random().nextInt(999999)}';
-String money(int cents)=>'${(cents/100).toStringAsFixed(2)} د.ل';
-String dateText(DateTime d)=>'${d.day.toString().padLeft(2,'0')}/${d.month.toString().padLeft(2,'0')}/${d.year}';
-String timeText(DateTime d)=>'${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}';
-int parseCents(String v){final n=double.tryParse(v.trim().replaceAll('٬','').replaceAll(',','.'));return n==null?0:(n*100).round();}
-String phone218(String v){var p=v.replaceAll(RegExp(r'[^0-9]'),'');if(p.startsWith('00'))p=p.substring(2);if(p.startsWith('218'))return p;if(p.startsWith('0'))return '218${p.substring(1)}';return p;}
-Future<bool> wa(String phone,String msg)async{final n=phone218(phone);if(n.isEmpty)return false;try{return await launchUrl(Uri.https('wa.me','/$n',{'text':msg}),mode:LaunchMode.externalApplication);}catch(_){return false;}}
+const emerald = Color(0xFF0F5C6E), mint = Color(0xFF2EC4B6), burgundy = Color(0xFFE63946);
 
-class Customer{Customer({required this.id,required this.name,required this.phone,this.limitCents=0});String id,name,phone;int limitCents;Map<String,dynamic> toJson()=>{'id':id,'name':name,'phone':phone,'limitCents':limitCents};factory Customer.fromJson(Map<String,dynamic> j){final legacy=(j['limit'] as num?)?.toDouble()??0;return Customer(id:'${j['id']??''}',name:'${j['name']??''}',phone:'${j['phone']??''}',limitCents:j['limitCents'] is num?(j['limitCents'] as num).toInt():(legacy*100).round());}}
-class Tx{Tx({required this.id,required this.customerId,required this.type,required this.amountCents,required this.date,required this.note});String id,customerId,type,note;int amountCents;DateTime date;Map<String,dynamic> toJson()=>{'id':id,'customerId':customerId,'type':type,'amountCents':amountCents,'date':date.toIso8601String(),'note':note};factory Tx.fromJson(Map<String,dynamic> j){final legacy=(j['amount'] as num?)?.toDouble()??0;return Tx(id:'${j['id']??''}',customerId:'${j['customerId']??''}',type:'${j['type']??'debt'}',amountCents:j['amountCents'] is num?(j['amountCents'] as num).toInt():(legacy*100).round(),date:DateTime.tryParse('${j['date']}')??DateTime.now(),note:'${j['note']??''}');}}
-class VoiceDraft{VoiceDraft({required this.id,required this.text,required this.date,required this.customerId,required this.amountCents,required this.note});String id,text,customerId,note;DateTime date;int amountCents;Map<String,dynamic> toJson()=>{'id':id,'text':text,'date':date.toIso8601String(),'customerId':customerId,'amountCents':amountCents,'note':note};factory VoiceDraft.fromJson(Map<String,dynamic> j){final legacy=(j['amount'] as num?)?.toDouble()??0;return VoiceDraft(id:'${j['id']??''}',text:'${j['text']??''}',date:DateTime.tryParse('${j['date']}')??DateTime.now(),customerId:'${j['customerId']??''}',amountCents:j['amountCents'] is num?(j['amountCents'] as num).toInt():(legacy*100).round(),note:'${j['note']??''}');}}
-
-class Store extends ChangeNotifier{
- late SharedPreferences prefs;final customers=<Customer>[];final transactions=<Tx>[];final voiceDrafts=<VoiceDraft>[];String shop='DainPay — دَيْن',whatsappMessage='السلام عليكم [الاسم]، تذكير لطيف بخصوص المتبقي عليكم قدره [المبلغ] د.ل.',uid='',deviceId='';bool firebaseReady=false,syncing=false,activated=false,isAdmin=false,dark=false;DateTime? trialStart;
- static Future<Store> load()async{final s=Store();s.prefs=await SharedPreferences.getInstance();s.shop=s.prefs.getString('shop')??s.shop;s.whatsappMessage=s.prefs.getString('whatsappMessage')??s.whatsappMessage;s.dark=s.prefs.getBool('dark')??false;s.activated=s.prefs.getBool('activated')??false;s.deviceId=s.prefs.getString('device_id')??'';if(s.deviceId.isEmpty){s.deviceId='DP-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(999999)}';await s.pref(()=>s.prefs.setString('device_id',s.deviceId));}final tr=s.prefs.getString('trial_start');if(tr==null){s.trialStart=DateTime.now();await s.pref(()=>s.prefs.setString('trial_start',s.trialStart!.toIso8601String()));}else{s.trialStart=DateTime.tryParse(tr);}try{final a=jsonDecode(s.prefs.getString('customers')??'[]')as List;s.customers.addAll(a.map((e)=>Customer.fromJson(Map<String,dynamic>.from(e))));}catch(_){ }try{final a=jsonDecode(s.prefs.getString('transactions')??'[]')as List;s.transactions.addAll(a.map((e)=>Tx.fromJson(Map<String,dynamic>.from(e))));}catch(_){ }try{final a=jsonDecode(s.prefs.getString('voice_drafts')??'[]')as List;s.voiceDrafts.addAll(a.map((e)=>VoiceDraft.fromJson(Map<String,dynamic>.from(e))));}catch(_){ }return s;}
- Future<void> pref(Future<bool> Function() f)async{try{await f();}catch(e){debugPrint('Prefs: $e');}}
- int get trialDaysLeft=>activated||trialStart==null?0:max(0,10-DateTime.now().difference(trialStart!).inDays);bool get locked=>!activated&&trialDaysLeft<=0;
- CollectionReference<Map<String,dynamic>> get cr=>FirebaseFirestore.instance.collection('users').doc(uid).collection('customers');CollectionReference<Map<String,dynamic>> get tr=>FirebaseFirestore.instance.collection('users').doc(uid).collection('transactions');
- Future<void> connectFirebase()async{try{var u=FirebaseAuth.instance.currentUser;u??=(await FirebaseAuth.instance.signInAnonymously()).user;if(u==null)return;uid=u.uid;firebaseReady=true;await pullCloud();await loadActivation();}catch(e){firebaseReady=false;debugPrint('Firebase: $e');}notifyListeners();}
- Future<void> loadActivation()async{if(!firebaseReady)return;try{final d=await FirebaseFirestore.instance.collection('device_activations').doc(deviceId).get();if(d.data()?['activated']==true){activated=true;await pref(()=>prefs.setBool('activated',true));}}catch(e){debugPrint('Activation: $e');}}
- Future<void> pullCloud()async{if(!firebaseReady||uid.isEmpty||syncing)return;syncing=true;try{for(final d in(await cr.get()).docs){final c=Customer.fromJson(d.data());final i=customers.indexWhere((x)=>x.id==c.id);if(i<0)customers.add(c);else customers[i]=c;}for(final d in(await tr.get()).docs){final x=d.data();final raw=x['date'];final dt=raw is Timestamp?raw.toDate():DateTime.tryParse('$raw')??DateTime.now();final legacy=(x['amount']as num?)?.toDouble()??0;final t=Tx(id:'${x['id']??d.id}',customerId:'${x['customerId']??''}',type:'${x['type']??'debt'}',amountCents:x['amountCents']is num?(x['amountCents']as num).toInt():(legacy*100).round(),date:dt,note:'${x['note']??''}');final i=transactions.indexWhere((z)=>z.id==t.id);if(i<0)transactions.add(t);else transactions[i]=t;}await saveLocal();}catch(e){debugPrint('Pull: $e');}finally{syncing=false;}}
- Future<void> saveLocal()async{await pref(()=>prefs.setString('customers',jsonEncode(customers.map((e)=>e.toJson()).toList())));await pref(()=>prefs.setString('transactions',jsonEncode(transactions.map((e)=>e.toJson()).toList())));await pref(()=>prefs.setString('voice_drafts',jsonEncode(voiceDrafts.map((e)=>e.toJson()).toList())));await pref(()=>prefs.setString('shop',shop));await pref(()=>prefs.setString('whatsappMessage',whatsappMessage));await pref(()=>prefs.setBool('dark',dark));}
- Future<void> save()async{await saveLocal();notifyListeners();await syncAll();}Future<void> saveCustomer(Customer c)async{customers.add(c);await save();}Future<void> saveTx(Tx t)async{transactions.add(t);await save();}
- Future<void> syncAll()async{if(!firebaseReady||uid.isEmpty||syncing)return;syncing=true;try{final b=FirebaseFirestore.instance.batch();for(final c in customers){b.set(cr.doc(c.id),c.toJson());}for(final t in transactions){b.set(tr.doc(t.id),{...t.toJson(),'date':Timestamp.fromDate(t.date)});}await b.commit();}catch(e){debugPrint('Batch: $e');}finally{syncing=false;}}
- int balance(String id)=>transactions.where((t)=>t.customerId==id).fold(0,(a,t)=>a+(t.type=='debt'?t.amountCents:-t.amountCents));int debts(String id)=>transactions.where((t)=>t.customerId==id&&t.type=='debt').fold(0,(a,t)=>a+t.amountCents);int paid(String id)=>transactions.where((t)=>t.customerId==id&&t.type=='payment').fold(0,(a,t)=>a+t.amountCents);
- String risk(String id){final b=balance(id);if(b<=0)return'مسدد';final ds=transactions.where((t)=>t.customerId==id&&t.type=='debt').toList()..sort((a,b)=>a.date.compareTo(b.date));if(ds.isEmpty)return'حديث';final d=DateTime.now().difference(ds.first.date).inDays;if(d>90)return'خطر';if(d>30)return'متأخر';return'حديث';}
- Future<bool> activateCode(String code)async{if(!firebaseReady||code.trim().isEmpty)return false;final ref=FirebaseFirestore.instance.collection('activation_codes').doc(code.trim());try{final ok=await FirebaseFirestore.instance.runTransaction<bool>((tx)async{final snap=await tx.get(ref);final d=snap.data();if(!snap.exists||d==null||d['used']==true)return false;final bound='${d['deviceId']??''}';if(bound.isNotEmpty&&bound!=deviceId)return false;tx.update(ref,{'used':true,'usedAt':FieldValue.serverTimestamp(),'usedDeviceId':deviceId});return true;});if(!ok)return false;await FirebaseFirestore.instance.collection('device_activations').doc(deviceId).set({'activated':true,'activatedAt':FieldValue.serverTimestamp(),'uid':uid});activated=true;await pref(()=>prefs.setBool('activated',true));notifyListeners();return true;}catch(e){debugPrint('Activate: $e');return false;}}
- Future<bool> checkAdmin(String pin)async{if(!firebaseReady)return false;try{final d=await FirebaseFirestore.instance.collection('config').doc('admin').get();if(d.data()?['pin']==pin){isAdmin=true;notifyListeners();return true;}}catch(e){debugPrint('Admin: $e');}return false;}
- Future<String?> generateCode(String device)async{if(!firebaseReady||!isAdmin||device.trim().isEmpty)return null;try{final code=(100000+Random().nextInt(900000)).toString();await FirebaseFirestore.instance.collection('activation_codes').doc(code).set({'deviceId':device.trim(),'used':false,'createdAt':FieldValue.serverTimestamp()});return code;}catch(e){debugPrint('Code: $e');return null;}}
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Firebase.initializeApp();
+  } catch (e) {
+    debugPrint('Firebase init: $e');
+  }
+  final s = await Store.load();
+  await s.connectFirebase();
+  runApp(DainPayApp(store: s));
 }
 
-class DainPayApp extends StatelessWidget{const DainPayApp({super.key,required this.store});final Store store;ThemeData theme(Brightness b){final cs=ColorScheme.fromSeed(seedColor:emerald,brightness:b).copyWith(primary:emerald,secondary:mint,error:burgundy);return ThemeData(useMaterial3:true,brightness:b,colorScheme:cs,fontFamily:'Cairo',cardTheme:CardTheme(shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),elevation:1),inputDecorationTheme:InputDecorationTheme(border:OutlineInputBorder(borderRadius:BorderRadius.circular(14)),filled:true));} @override Widget build(BuildContext c)=>AnimatedBuilder(animation:store,builder:(_,__)=>MaterialApp(debugShowCheckedModeBanner:false,title:'DainPay',theme:theme(Brightness.light),darkTheme:theme(Brightness.dark),themeMode:store.dark?ThemeMode.dark:ThemeMode.light,home:HomePage(store:store)));}
-class Logo extends StatelessWidget{const Logo({super.key});@override Widget build(BuildContext c)=>Container(width:42,height:42,alignment:Alignment.center,decoration:BoxDecoration(color:emerald,borderRadius:BorderRadius.circular(13)),child:const Text('DP',style:TextStyle(color:Colors.white,fontWeight:FontWeight.w900)));}
+String makeId() => '${DateTime.now().microsecondsSinceEpoch}_${Random().nextInt(999999)}';
+String money(int cents) => '${(cents / 100).toStringAsFixed(2)} د.ل';
+String dateText(DateTime d) => '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
+String timeText(DateTime d) => '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
 
-class HomePage extends StatefulWidget{const HomePage({super.key,required this.store});final Store store;@override State<HomePage>createState()=>_HomePageState();}
-class _HomePageState extends State<HomePage>{String q='',filter='all';int taps=0;DateTime? last;void hidden(){final n=DateTime.now();if(last==null||n.difference(last!).inSeconds>2)taps=0;last=n;if(++taps==3){taps=0;showDialog(context:context,builder:(_)=>AdminGate(store:widget.store));}}@override Widget build(BuildContext c){final s=widget.store;final list=s.customers.where((x){final b=s.balance(x.id);return(q.isEmpty||x.name.contains(q)||x.phone.contains(q))&&(filter=='all'||filter=='debt'&&b>0||filter=='paid'&&b<=0);}).toList()..sort((a,b)=>s.balance(b.id).compareTo(s.balance(a.id)));final total=s.customers.fold(0,(a,x)=>a+max(0,s.balance(x.id)));return Directionality(textDirection:TextDirection.rtl,child:Scaffold(appBar:AppBar(leading:const Padding(padding:EdgeInsets.all(8),child:Logo()),title:GestureDetector(onTap:hidden,child:Text(s.shop,style:const TextStyle(fontWeight:FontWeight.w900))),actions:[IconButton(onPressed:()=>Navigator.push(c,MaterialPageRoute(builder:(_)=>SettingsPage(store:s))),icon:const Icon(Icons.settings_outlined))]),body:ListView(padding:const EdgeInsets.all(12),children:[Card(child:Padding(padding:const EdgeInsets.all(16),child:Row(children:[Expanded(child:Column(children:[const Text('إجمالي المتبقي'),Text(money(total),style:const TextStyle(fontSize:21,fontWeight:FontWeight.w900))])),Expanded(child:Column(children:[const Text('العملاء'),Text('${s.customers.length}',style:const TextStyle(fontSize:21,fontWeight:FontWeight.w900))]))]))),TextField(decoration:const InputDecoration(hintText:'بحث بالاسم أو الهاتف',prefixIcon:Icon(Icons.search)),onChanged:(v)=>setState(()=>q=v.trim())),const SizedBox(height:8),Wrap(spacing:8,children:[ChoiceChip(label:const Text('الكل'),selected:filter=='all',onSelected:(_)=>setState(()=>filter='all')),ChoiceChip(label:const Text('عليهم دين'),selected:filter=='debt',onSelected:(_)=>setState(()=>filter='debt')),ChoiceChip(label:const Text('مسدد'),selected:filter=='paid',onSelected:(_)=>setState(()=>filter='paid'))]),...list.map((x)=>Card(child:ListTile(onTap:()=>Navigator.push(c,MaterialPageRoute(builder:(_)=>CustomerPage(store:s,customer:x))),leading:CircleAvatar(child:Text(x.name.isEmpty?'؟':x.name.substring(0,1))),title:Text(x.name,style:const TextStyle(fontWeight:FontWeight.bold)),subtitle:Text('${x.phone}\n${s.risk(x.id)} • دين ${money(s.debts(x.id))} • مسدد ${money(s.paid(x.id))}'),isThreeLine:true,trailing:Text(money(s.balance(x.id)),style:const TextStyle(fontWeight:FontWeight.w900))))]),floatingActionButton:FloatingActionButton.extended(onPressed:s.locked?()=>Navigator.push(c,MaterialPageRoute(builder:(_)=>ActivationPage(store:s))):()=>Navigator.push(c,MaterialPageRoute(builder:(_)=>AddCustomerPage(store:s)),),icon:Icon(s.locked?Icons.lock:Icons.person_add_alt_1),label:Text(s.locked?'التفعيل':'عميل جديد'))));}}
+int parseCents(String v) {
+  final n = double.tryParse(v.trim().replaceAll('٬', '').replaceAll(',', '.'));
+  return n == null ? 0 : (n * 100).round();
+}
 
-class AddCustomerPage extends StatefulWidget{const AddCustomerPage({super.key,required this.store});final Store store;@override State<AddCustomerPage>createState()=>_AddCustomerPageState();}
-class _AddCustomerPageState extends State<AddCustomerPage>{final n=TextEditingController(),p=TextEditingController(),l=TextEditingController();@override void dispose(){n.dispose();p.dispose();l.dispose();super.dispose();}Future<void> save()async{if(n.text.trim().isEmpty)return;await widget.store.saveCustomer(Customer(id:makeId(),name:n.text.trim(),phone:p.text.trim(),limitCents:parseCents(l.text)));if(mounted)Navigator.pop(context);}@override Widget build(BuildContext c)=>PageForm(title:'إضافة عميل',children:[TextField(controller:n,decoration:const InputDecoration(labelText:'اسم العميل')),TextField(controller:p,keyboardType:TextInputType.phone,decoration:const InputDecoration(labelText:'رقم الهاتف')),TextField(controller:l,keyboardType:const TextInputType.numberWithOptions(decimal:true),decoration:const InputDecoration(labelText:'السقف الائتماني اختياري')),FilledButton(onPressed:save,child:const Text('حفظ العميل'))]);}
-class PageForm extends StatelessWidget{const PageForm({super.key,required this.title,required this.children});final String title;final List<Widget> children;@override Widget build(BuildContext c)=>Directionality(textDirection:TextDirection.rtl,child:Scaffold(appBar:AppBar(title:Text(title)),body:ListView(padding:const EdgeInsets.all(16),children:children.map((x)=>Padding(padding:const EdgeInsets.only(bottom:12),child:x)).toList())));}
+String phone218(String v) {
+  var p = v.replaceAll(RegExp(r'[^0-9]'), '');
+  if (p.startsWith('00')) p = p.substring(2);
+  if (p.startsWith('218')) return p;
+  if (p.startsWith('0')) return '218${p.substring(1)}';
+  return p;
+}
 
-class CustomerPage extends StatelessWidget{const CustomerPage({super.key,required this.store,required this.customer});final Store store;final Customer customer;Future<void> openWa(BuildContext c)async{final ok=await wa(customer.phone,store.whatsappMessage.replaceAll('[الاسم]',customer.name).replaceAll('[المبلغ]',money(store.balance(customer.id))));if(!ok&&c.mounted)ScaffoldMessenger.of(c).showSnackBar(const SnackBar(content:Text('تعذر فتح واتساب')));}@override Widget build(BuildContext c){final rows=store.transactions.where((t)=>t.customerId==customer.id).toList()..sort((a,b)=>b.date.compareTo(a.date));return Directionality(textDirection:TextDirection.rtl,child:Scaffold(appBar:AppBar(title:Text(customer.name)),body:ListView(padding:const EdgeInsets.all(12),children:[Card(child:Padding(padding:const EdgeInsets.all(18),child:Column(children:[const Icon(Icons.account_balance_wallet_rounded,size:34,color:emerald),Text(money(store.balance(customer.id)),style:const TextStyle(fontSize:30,fontWeight:FontWeight.w900)),Text('الدين ${money(store.debts(customer.id))} • المسدد ${money(store.paid(customer.id))}'),Wrap(spacing:8,children:[FilledButton.icon(onPressed:()=>openWa(c),icon:const Icon(Icons.chat_rounded),label:const Text('واتساب')),OutlinedButton.icon(onPressed:()=>launchUrl(Uri.parse('tel:${customer.phone}')),icon:const Icon(Icons.phone_rounded),label:const Text('اتصال'))])]))),...rows.map((t)=>Card(child:ListTile(leading:Icon(t.type=='debt'?Icons.arrow_downward_rounded:Icons.arrow_upward_rounded,color:t.type=='debt'?burgundy:mint),title:Text(t.type=='debt'?'دَين':'تسديد'),subtitle:Text('${dateText(t.date)} ${timeText(t.date)}${t.note.isEmpty?'':' • ${t.note}'}'),trailing:Text(money(t.amountCents),style:TextStyle(fontWeight:FontWeight.w900,color:t.type=='debt'?burgundy:mint)))))]),floatingActionButton:FloatingActionButton.extended(onPressed:store.locked?()=>Navigator.push(c,MaterialPageRoute(builder:(_)=>ActivationPage(store:store))):()=>Navigator.push(c,MaterialPageRoute(builder:(_)=>AddTransactionPage(store:store,customer:customer)),),icon:Icon(store.locked?Icons.lock:Icons.swap_horiz_rounded),label:Text(store.locked?'التفعيل':'عملية جديدة')));}}
+Future<bool> wa(String phone, String msg) async {
+  final n = phone218(phone);
+  if (n.isEmpty) return false;
+  try {
+    return await launchUrl(Uri.https('wa.me', '/$n', {'text': msg}), mode: LaunchMode.externalApplication);
+  } catch (_) {
+    return false;
+  }
+}
 
-class AddTransactionPage extends StatefulWidget{const AddTransactionPage({super.key,required this.store,required this.customer});final Store store;final Customer customer;@override State<AddTransactionPage>createState()=>_AddTransactionPageState();}
-class _AddTransactionPageState extends State<AddTransactionPage>{final a=TextEditingController(),n=TextEditingController();String type='debt';@override void dispose(){a.dispose();n.dispose();super.dispose();}Future<void> save()async{final cents=parseCents(a.text);if(cents<=0)return;final current=widget.store.balance(widget.customer.id);if(type=='debt'&&widget.customer.limitCents>0&&current+cents>widget.customer.limitCents){if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('العملية تتجاوز السقف الائتماني')));return;}await widget.store.saveTx(Tx(id:makeId(),customerId:widget.customer.id,type:type,amountCents:cents,date:DateTime.now(),note:n.text.trim()));if(mounted)Navigator.pop(context);}@override Widget build(BuildContext c)=>PageForm(title:type=='debt'?'إضافة دَين':'تسجيل تسديد',children:[SegmentedButton<String>(segments:const[ButtonSegment(value:'debt',label:Text('دَين')),ButtonSegment(value:'payment',label:Text('تسديد'))],selected:{type},onSelectionChanged:(v)=>setState(()=>type=v.first)),TextField(controller:a,keyboardType:const TextInputType.numberWithOptions(decimal:true),decoration:const InputDecoration(labelText:'المبلغ')),TextField(controller:n,decoration:const InputDecoration(labelText:'البيان / الملاحظات')),FilledButton(onPressed:save,child:const Text('حفظ العملية'))]);}
+class Customer {
+  Customer({required this.id, required this.name, required this.phone, this.limitCents = 0});
+  String id, name, phone;
+  int limitCents;
 
-class VoiceDraftsPage extends StatefulWidget{const VoiceDraftsPage({super.key,required this.store});final Store store;@override State<VoiceDraftsPage>createState()=>_VoiceDraftsPageState();}
-class _VoiceDraftsPageState extends State<VoiceDraftsPage>{final speech=stt.SpeechToText();bool listening=false;String live='';double? amount(String t){final m=RegExp(r'(\d+(?:[.,]\d+)?)').firstMatch(t);if(m!=null)return double.tryParse(m.group(1)!.replaceAll(',','.'));const w={'مية':100,'مائة':100,'مئة':100,'ألف':1000,'الف':1000,'عشرة':10,'عشرين':20,'ثلاثين':30,'أربعين':40,'خمسين':50,'ستين':60,'سبعين':70,'ثمانين':80,'تسعين':90};for(final e in w.entries){if(t.contains(e.key))return e.value.toDouble();}return null;}String findCustomer(String t){for(final c in widget.store.customers){if(t.contains(c.name))return c.id;}return '';}
- Future<void> record()async{if(listening){try{await speech.stop();}catch(_){ }if(mounted)setState(()=>listening=false);return;}try{final ok=await speech.initialize(onStatus:(x){if(!mounted)return;if(x=='notListening')setState(()=>listening=false);},onError:(_){if(mounted)setState(()=>listening=false);});if(!ok){if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون')));return;}if(!mounted)return;setState(()=>listening=true);await speech.listen(localeId:'ar-LY',partialResults:true,onResult:(r){if(!mounted)return;setState(()=>live=r.recognizedWords);if(r.finalResult){final text=r.recognizedWords.trim();if(text.isNotEmpty){widget.store.voiceDrafts.insert(0,VoiceDraft(id:makeId(),text:text,date:DateTime.now(),customerId:findCustomer(text),amountCents:((amount(text)??0)*100).round(),note:text));widget.store.saveLocal();}if(mounted)setState(()=>listening=false);}});}catch(e){if(mounted){setState(()=>listening=false);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('خطأ في التسجيل: $e')));}}}
- @override void dispose(){speech.stop();super.dispose();}@override Widget build(BuildContext c){final d=widget.store.voiceDrafts;return Directionality(textDirection:TextDirection.rtl,child:Scaffold(appBar:AppBar(title:const Text('المسودات الصوتية')),body:ListView(padding:const EdgeInsets.all(12),children:[Card(child:ListTile(onTap:record,leading:Icon(listening?Icons.stop_circle:Icons.mic_rounded,color:listening?burgundy:emerald),title:Text(listening?'جارٍ الاستماع...':'تسجيل عملية صوتية'),subtitle:Text(live.isEmpty?'مثال: محمد 150 بضاعة':live))),...d.map((x)=>Card(child:ListTile(title:Text(x.customerId.isEmpty?'عميل غير محدد':widget.store.customers.firstWhere((c)=>c.id==x.customerId,orElse:()=>Customer(id:'',name:'غير معروف',phone:'')).name),subtitle:Text('${x.text}\nالمبلغ: ${money(x.amountCents)}'),isThreeLine:true,onTap:()=>Navigator.push(c,MaterialPageRoute(builder:(_)=>VoiceReviewPage(store:widget.store,draft:x))))))]),floatingActionButton:FloatingActionButton(onPressed:record,child:Icon(listening?Icons.stop:Icons.mic))));}}
-class VoiceReviewPage extends StatefulWidget{const VoiceReviewPage({super.key,required this.store,required this.draft});final Store store;final VoiceDraft draft;@override State<VoiceReviewPage>createState()=>_VoiceReviewPageState();}
-class _VoiceReviewPageState extends State<VoiceReviewPage>{late TextEditingController a,n;String customerId='',type='debt';@override void initState(){super.initState();a=TextEditingController(text:widget.draft.amountCents>0?(widget.draft.amountCents/100).toStringAsFixed(2):'');n=TextEditingController(text:widget.draft.note);customerId=widget.draft.customerId;}@override void dispose(){a.dispose();n.dispose();super.dispose();}Future<void> approve()async{final cents=parseCents(a.text);final matches=widget.store.customers.where((x)=>x.id==customerId);if(matches.isEmpty||cents<=0)return;final c=matches.first;if(type=='debt'&&c.limitCents>0&&widget.store.balance(c.id)+cents>c.limitCents){if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('العملية تتجاوز السقف الائتماني')));return;}await widget.store.saveTx(Tx(id:makeId(),customerId:c.id,type:type,amountCents:cents,date:DateTime.now(),note:n.text.trim()));widget.store.voiceDrafts.removeWhere((x)=>x.id==widget.draft.id);await widget.store.saveLocal();if(mounted)Navigator.pop(context);}@override Widget build(BuildContext c)=>PageForm(title:'مراجعة التسجيل الصوتي',children:[Card(child:Padding(padding:const EdgeInsets.all(14),child:Text(widget.draft.text,style:const TextStyle(fontWeight:FontWeight.bold)))),DropdownButtonFormField<String>(value:customerId.isEmpty?null:customerId,decoration:const InputDecoration(labelText:'الزبون'),items:widget.store.customers.map((x)=>DropdownMenuItem(value:x.id,child:Text(x.name))).toList(),onChanged:(v)=>setState(()=>customerId=v??'')),SegmentedButton<String>(segments:const[ButtonSegment(value:'debt',label:Text('دَين')),ButtonSegment(value:'payment',label:Text('تسديد'))],selected:{type},onSelectionChanged:(v)=>setState(()=>type=v.first)),TextField(controller:a,keyboardType:const TextInputType.numberWithOptions(decimal:true),decoration:const InputDecoration(labelText:'المبلغ')),TextField(controller:n,maxLines:2,decoration:const InputDecoration(labelText:'البيان')),FilledButton(onPressed:approve,child:const Text('اعتماد وحفظ'))]);}
+  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'phone': phone, 'limitCents': limitCents};
 
-class SettingsPage extends StatefulWidget{const SettingsPage({super.key,required this.store});final Store store;@override State<SettingsPage>createState()=>_SettingsPageState();}
-class _SettingsPageState extends State<SettingsPage>{late TextEditingController shop,msg;@override void initState(){super.initState();shop=TextEditingController(text:widget.store.shop);msg=TextEditingController(text:widget.store.whatsappMessage);}@override void dispose(){shop.dispose();msg.dispose();super.dispose();}Future<void> save()async{widget.store.shop=shop.text.trim().isEmpty?'DainPay — دَيْن':shop.text.trim();widget.store.whatsappMessage=msg.text.trim();await widget.store.save();if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تم حفظ الإعدادات')));}@override Widget build(BuildContext c)=>Directionality(textDirection:TextDirection.rtl,child:Scaffold(appBar:AppBar(title:const Text('الإعدادات')),body:ListView(padding:const EdgeInsets.all(16),children:[TextField(controller:shop,decoration:const InputDecoration(labelText:'اسم المحل / النشاط')),SwitchListTile(value:widget.store.dark,onChanged:(v){setState(()=>widget.store.dark=v);widget.store.save();},title:const Text('الوضع الداكن')),TextField(controller:msg,maxLines:3,decoration:const InputDecoration(labelText:'قالب رسالة واتساب')),ListTile(title:const Text('رقم الجهاز'),subtitle:Text(widget.store.deviceId)),FilledButton(onPressed:save,child:const Text('حفظ')),OutlinedButton(onPressed:()=>Navigator.push(c,MaterialPageRoute(builder:(_)=>VoiceDraftsPage(store:widget.store))),child:const Text('المسودات الصوتية')),OutlinedButton(onPressed:()=>Navigator.push(c,MaterialPageRoute(builder:(_)=>ActivationPage(store:widget.store))),child:const Text('التفعيل'))]));}}
-class ActivationPage extends StatefulWidget{const ActivationPage({super.key,required this.store});final Store store;@override State<ActivationPage>createState()=>_ActivationPageState();}
-class _ActivationPageState extends State<ActivationPage>{final code=TextEditingController();bool busy=false;@override void dispose(){code.dispose();super.dispose();}Future<void> go()async{setState(()=>busy=true);final ok=await widget.store.activateCode(code.text);if(!mounted)return;setState(()=>busy=false);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(ok?'تم التفعيل الدائم بنجاح':'الكود غير صحيح أو مستخدم أو مخصص لجهاز آخر')));if(ok)Navigator.pop(context);}@override Widget build(BuildContext c)=>Directionality(textDirection:TextDirection.rtl,child:Scaffold(appBar:AppBar(title:const Text('التفعيل')),body:ListView(padding:const EdgeInsets.all(16),children:[Text(widget.store.activated?'التطبيق مفعّل بصفة دائمة':'التجربة المجانية: ${widget.store.trialDaysLeft} أيام',style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)),Text('رقم الجهاز: ${widget.store.deviceId}'),FilledButton.icon(onPressed:()=>wa('+218934951072','طلب تفعيل DainPay - رقم الجهاز: ${widget.store.deviceId}'),icon:const Icon(Icons.chat),label:const Text('طلب رمز عبر واتساب')),TextField(controller:code,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'كود التفعيل')),FilledButton(onPressed:busy?null:go,child:Text(busy?'جارٍ التحقق...':'تفعيل دائم'))]));}}
-class AdminGate extends StatefulWidget{const AdminGate({super.key,required this.store});final Store store;@override State<AdminGate>createState()=>_AdminGateState();}
-class _AdminGateState extends State<AdminGate>{final pin=TextEditingController();bool busy=false;@override void dispose(){pin.dispose();super.dispose();}Future<void> enter()async{setState(()=>busy=true);final ok=await widget.store.checkAdmin(pin.text.trim());if(!mounted)return;setState(()=>busy=false);if(ok){Navigator.pop(context);Navigator.push(context,MaterialPageRoute(builder:(_)=>AdminPage(store:widget.store)));}else{ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('رمز المالك غير صحيح أو لا توجد صلاحية')));}}@override Widget build(BuildContext c)=>AlertDialog(title:const Text('لوحة المالك'),content:TextField(controller:pin,obscureText:true,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'رمز المالك')),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('إلغاء')),FilledButton(onPressed:busy?null:enter,child:Text(busy?'جارٍ التحقق...':'دخول'))]);}}
-class AdminPage extends StatefulWidget{const AdminPage({super.key,required this.store});final Store store;@override State<AdminPage>createState()=>_AdminPageState();}
-class _AdminPageState extends State<AdminPage>{final device=TextEditingController();String result='';bool busy=false;@override void dispose(){device.dispose();super.dispose();}Future<void> generate()async{if(device.text.trim().isEmpty)return;setState(()=>busy=true);final r=await widget.store.generateCode(device.text);if(!mounted)return;setState((){busy=false;result=r??'تعذر التوليد';});}@override Widget build(BuildContext c)=>Directionality(textDirection:TextDirection.rtl,child:Scaffold(appBar:AppBar(title:const Text('إدارة التفعيل')),body:ListView(padding:const EdgeInsets.all(16),children:[TextField(controller:device,decoration:const InputDecoration(labelText:'Device ID')),FilledButton(onPressed:busy?null:generate,child:Text(busy?'جارٍ التوليد...':'توليد رمز')),if(result.isNotEmpty)Card(child:ListTile(title:const Text('رمز التفعيل'),subtitle:Text(result,style:const TextStyle(fontSize:24,fontWeight:FontWeight.w900)),trailing:result.length==6?IconButton(onPressed:()=>wa('+218934951072','رمز تفعيل DainPay: $result'),icon:const Icon(Icons.send)):null))]));}}
+  factory Customer.fromJson(Map<String, dynamic> j) {
+    final legacy = (j['limit'] as num?)?.toDouble() ?? 0;
+    return Customer(
+      id: '${j['id'] ?? ''}',
+      name: '${j['name'] ?? ''}',
+      phone: '${j['phone'] ?? ''}',
+      limitCents: j['limitCents'] is num ? (j['limitCents'] as num).toInt() : (legacy * 100).round(),
+    );
+  }
+}
+
+class Tx {
+  Tx({required this.id, required this.customerId, required this.type, required this.amountCents, required this.date, required this.note});
+  String id, customerId, type, note;
+  int amountCents;
+  DateTime date;
+
+  Map<String, dynamic> toJson() => {'id': id, 'customerId': customerId, 'type': type, 'amountCents': amountCents, 'date': date.toIso8601String(), 'note': note};
+
+  factory Tx.fromJson(Map<String, dynamic> j) {
+    final legacy = (j['amount'] as num?)?.toDouble() ?? 0;
+    return Tx(
+      id: '${j['id'] ?? ''}',
+      customerId: '${j['customerId'] ?? ''}',
+      type: '${j['type'] ?? 'debt'}',
+      amountCents: j['amountCents'] is num ? (j['amountCents'] as num).toInt() : (legacy * 100).round(),
+      date: DateTime.tryParse('${j['date']}') ?? DateTime.now(),
+      note: '${j['note'] ?? ''}',
+    );
+  }
+}
+
+class VoiceDraft {
+  VoiceDraft({required this.id, required this.text, required this.date, required this.customerId, required this.amountCents, required this.note});
+  String id, text, customerId, note;
+  DateTime date;
+  int amountCents;
+
+  Map<String, dynamic> toJson() => {'id': id, 'text': text, 'date': date.toIso8601String(), 'customerId': customerId, 'amountCents': amountCents, 'note': note};
+
+  factory VoiceDraft.fromJson(Map<String, dynamic> j) {
+    final legacy = (j['amount'] as num?)?.toDouble() ?? 0;
+    return VoiceDraft(
+      id: '${j['id'] ?? ''}',
+      text: '${j['text'] ?? ''}',
+      date: DateTime.tryParse('${j['date']}') ?? DateTime.now(),
+      customerId: '${j['customerId'] ?? ''}',
+      amountCents: j['amountCents'] is num ? (j['amountCents'] as num).toInt() : (legacy * 100).round(),
+      note: '${j['note'] ?? ''}',
+    );
+  }
+}
+
+class Store extends ChangeNotifier {
+  late SharedPreferences prefs;
+  final customers = <Customer>[];
+  final transactions = <Tx>[];
+  final voiceDrafts = <VoiceDraft>[];
+  String shop = 'DainPay — دَيْن', whatsappMessage = 'السلام عليكم [الاسم]، تذكير لطيف بخصوص المتبقي عليكم قدره [المبلغ] د.ل.', uid = '', deviceId = '';
+  bool firebaseReady = false, syncing = false, activated = false, isAdmin = false, dark = false;
+  DateTime? trialStart;
+
+  static Future<Store> load() async {
+    final s = Store();
+    s.prefs = await SharedPreferences.getInstance();
+    s.shop = s.prefs.getString('shop') ?? s.shop;
+    s.whatsappMessage = s.prefs.getString('whatsappMessage') ?? s.whatsappMessage;
+    s.dark = s.prefs.getBool('dark') ?? false;
+    s.activated = s.prefs.getBool('activated') ?? false;
+    s.deviceId = s.prefs.getString('device_id') ?? '';
+    if (s.deviceId.isEmpty) {
+      s.deviceId = 'DP-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(999999)}';
+      await s.pref(() => s.prefs.setString('device_id', s.deviceId));
+    }
+    final tr = s.prefs.getString('trial_start');
+    if (tr == null) {
+      s.trialStart = DateTime.now();
+      await s.pref(() => s.prefs.setString('trial_start', s.trialStart!.toIso8601String()));
+    } else {
+      s.trialStart = DateTime.tryParse(tr);
+    }
+    try {
+      final a = jsonDecode(s.prefs.getString('customers') ?? '[]') as List;
+      s.customers.addAll(a.map((e) => Customer.fromJson(Map<String, dynamic>.from(e))));
+    } catch (_) {}
+    try {
+      final a = jsonDecode(s.prefs.getString('transactions') ?? '[]') as List;
+      s.transactions.addAll(a.map((e) => Tx.fromJson(Map<String, dynamic>.from(e))));
+    } catch (_) {}
+    try {
+      final a = jsonDecode(s.prefs.getString('voice_drafts') ?? '[]') as List;
+      s.voiceDrafts.addAll(a.map((e) => VoiceDraft.fromJson(Map<String, dynamic>.from(e))));
+    } catch (_) {}
+    return s;
+  }
+
+  Future<void> pref(Future<bool> Function() f) async {
+    try {
+      await f();
+    } catch (e) {
+      debugPrint('Prefs: $e');
+    }
+  }
+
+  int get trialDaysLeft => activated || trialStart == null ? 0 : max(0, 10 - DateTime.now().difference(trialStart!).inDays);
+  bool get locked => !activated && trialDaysLeft <= 0;
+
+  CollectionReference<Map<String, dynamic>> get cr => FirebaseFirestore.instance.collection('users').doc(uid).collection('customers');
+  CollectionReference<Map<String, dynamic>> get tr => FirebaseFirestore.instance.collection('users').doc(uid).collection('transactions');
+
+  Future<void> connectFirebase() async {
+    try {
+      var u = FirebaseAuth.instance.currentUser;
+      u ??= (await FirebaseAuth.instance.signInAnonymously()).user;
+      if (u == null) return;
+      uid = u.uid;
+      firebaseReady = true;
+      await pullCloud();
+      await loadActivation();
+    } catch (e) {
+      firebaseReady = false;
+      debugPrint('Firebase: $e');
+    }
+    notifyListeners();
+  }
+
+  Future<void> loadActivation() async {
+    if (!firebaseReady) return;
+    try {
+      final d = await FirebaseFirestore.instance.collection('device_activations').doc(deviceId).get();
+      if (d.data()?['activated'] == true) {
+        activated = true;
+        await pref(() => prefs.setBool('activated', true));
+      }
+    } catch (e) {
+      debugPrint('Activation: $e');
+    }
+  }
+
+  Future<void> pullCloud() async {
+    if (!firebaseReady || uid.isEmpty || syncing) return;
+    syncing = true;
+    try {
+      for (final d in (await cr.get()).docs) {
+        final c = Customer.fromJson(d.data());
+        final i = customers.indexWhere((x) => x.id == c.id);
+        if (i < 0) customers.add(c); else customers[i] = c;
+      }
+      for (final d in (await tr.get()).docs) {
+        final x = d.data();
+        final raw = x['date'];
+        final dt = raw is Timestamp ? raw.toDate() : DateTime.tryParse('$raw') ?? DateTime.now();
+        final legacy = (x['amount'] as num?)?.toDouble() ?? 0;
+        final t = Tx(
+          id: '${x['id'] ?? d.id}',
+          customerId: '${x['customerId'] ?? ''}',
+          type: '${x['type'] ?? 'debt'}',
+          amountCents: x['amountCents'] is num ? (x['amountCents'] as num).toInt() : (legacy * 100).round(),
+          date: dt,
+          note: '${x['note'] ?? ''}',
+        );
+        final i = transactions.indexWhere((z) => z.id == t.id);
+        if (i < 0) transactions.add(t); else transactions[i] = t;
+      }
+      await saveLocal();
+    } catch (e) {
+      debugPrint('Pull: $e');
+    } finally {
+      syncing = false;
+    }
+  }
+
+  Future<void> saveLocal() async {
+    await pref(() => prefs.setString('customers', jsonEncode(customers.map((e) => e.toJson()).toList())));
+    await pref(() => prefs.setString('transactions', jsonEncode(transactions.map((e) => e.toJson()).toList())));
+    await pref(() => prefs.setString('voice_drafts', jsonEncode(voiceDrafts.map((e) => e.toJson()).toList())));
+    await pref(() => prefs.setString('shop', shop));
+    await pref(() => prefs.setString('whatsappMessage', whatsappMessage));
+    await pref(() => prefs.setBool('dark', dark));
+  }
+
+  Future<void> save() async {
+    await saveLocal();
+    notifyListeners();
+    await syncAll();
+  }
+
+  Future<void> saveCustomer(Customer c) async {
+    customers.add(c);
+    await save();
+  }
+
+  Future<void> saveTx(Tx t) async {
+    transactions.add(t);
+    await save();
+  }
+
+  Future<void> syncAll() async {
+    if (!firebaseReady || uid.isEmpty || syncing) return;
+    syncing = true;
+    try {
+      final b = FirebaseFirestore.instance.batch();
+      for (final c in customers) {
+        b.set(cr.doc(c.id), c.toJson());
+      }
+      for (final t in transactions) {
+        b.set(tr.doc(t.id), {...t.toJson(), 'date': Timestamp.fromDate(t.date)});
+      }
+      await b.commit();
+    } catch (e) {
+      debugPrint('Batch: $e');
+    } finally {
+      syncing = false;
+    }
+  }
+
+  int balance(String id) => transactions.where((t) => t.customerId == id).fold(0, (a, t) => a + (t.type == 'debt' ? t.amountCents : -t.amountCents));
+  int debts(String id) => transactions.where((t) => t.customerId == id && t.type == 'debt').fold(0, (a, t) => a + t.amountCents);
+  int paid(String id) => transactions.where((t) => t.customerId == id && t.type == 'payment').fold(0, (a, t) => a + t.amountCents);
+
+  String risk(String id) {
+    final b = balance(id);
+    if (b <= 0) return 'مسدد';
+    final ds = transactions.where((t) => t.customerId == id && t.type == 'debt').toList()..sort((a, b) => a.date.compareTo(b.date));
+    if (ds.isEmpty) return 'حديث';
+    final d = DateTime.now().difference(ds.first.date).inDays;
+    if (d > 90) return 'خطر';
+    if (d > 30) return 'متأخر';
+    return 'حديث';
+  }
+
+  Future<bool> activateCode(String code) async {
+    if (!firebaseReady || code.trim().isEmpty) return false;
+    final ref = FirebaseFirestore.instance.collection('activation_codes').doc(code.trim());
+    try {
+      final ok = await FirebaseFirestore.instance.runTransaction<bool>((tx) async {
+        final snap = await tx.get(ref);
+        final d = snap.data();
+        if (!snap.exists || d == null || d['used'] == true) return false;
+        final bound = '${d['deviceId'] ?? ''}';
+        if (bound.isNotEmpty && bound != deviceId) return false;
+        tx.update(ref, {'used': true, 'usedAt': FieldValue.serverTimestamp(), 'usedDeviceId': deviceId});
+        return true;
+      });
+      if (!ok) return false;
+      await FirebaseFirestore.instance.collection('device_activations').doc(deviceId).set({'activated': true, 'activatedAt': FieldValue.serverTimestamp(), 'uid': uid});
+      activated = true;
+      await pref(() => prefs.setBool('activated', true));
+      notifyListeners();
+      return true;
+    } catch (e) {
+      debugPrint('Activate: $e');
+      return false;
+    }
+  }
+
+  Future<bool> checkAdmin(String pin) async {
+    if (!firebaseReady) return false;
+    try {
+      final d = await FirebaseFirestore.instance.collection('config').doc('admin').get();
+      if (d.data()?['pin'] == pin) {
+        isAdmin = true;
+        notifyListeners();
+        return true;
+      }
+    } catch (e) {
+      debugPrint('Admin: $e');
+    }
+    return false;
+  }
+
+  Future<String?> generateCode(String device) async {
+    if (!firebaseReady || !isAdmin || device.trim().isEmpty) return null;
+    try {
+      final code = (100000 + Random().nextInt(900000)).toString();
+      await FirebaseFirestore.instance.collection('activation_codes').doc(code).set({'deviceId': device.trim(), 'used': false, 'createdAt': FieldValue.serverTimestamp()});
+      return code;
+    } catch (e) {
+      debugPrint('Code: $e');
+      return null;
+    }
+  }
+}
+
+class DainPayApp extends StatelessWidget {
+  const DainPayApp({super.key, required this.store});
+  final Store store;
+
+  ThemeData theme(Brightness b) {
+    final cs = ColorScheme.fromSeed(seedColor: emerald, brightness: b).copyWith(primary: emerald, secondary: mint, error: burgundy);
+    return ThemeData(
+      useMaterial3: true,
+      brightness: b,
+      colorScheme: cs,
+      fontFamily: 'Cairo',
+      cardTheme: CardTheme(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), elevation: 1),
+      inputDecorationTheme: InputDecorationTheme(border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)), filled: true),
+    );
+  }
+
+  @override
+  Widget build(BuildContext c) => AnimatedBuilder(
+        animation: store,
+        builder: (_, __) => MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title: 'DainPay',
+          theme: theme(Brightness.light),
+          darkTheme: theme(Brightness.dark),
+          themeMode: store.dark ? ThemeMode.dark : ThemeMode.light,
+          home: HomePage(store: store),
+        ),
+      );
+}
+
+class Logo extends StatelessWidget {
+  const Logo({super.key});
+
+  @override
+  Widget build(BuildContext c) => Container(
+        width: 42,
+        height: 42,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(color: emerald, borderRadius: BorderRadius.circular(13)),
+        child: const Text('DP', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900)),
+      );
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key, required this.store});
+  final Store store;
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  String q = '', filter = 'all';
+  int taps = 0;
+  DateTime? last;
+
+  void hidden() {
+    final n = DateTime.now();
+    if (last == null || n.difference(last!).inSeconds > 2) taps = 0;
+    last = n;
+    if (++taps == 3) {
+      taps = 0;
+      showDialog(context: context, builder: (_) => AdminGate(store: widget.store));
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final s = widget.store;
+    final list = s.customers.where((x) {
+      final b = s.balance(x.id);
+      return (q.isEmpty || x.name.contains(q) || x.phone.contains(q)) && (filter == 'all' || filter == 'debt' && b > 0 || filter == 'paid' && b <= 0);
+    }).toList()..sort((a, b) => s.balance(b.id).compareTo(s.balance(a.id)));
+    final total = s.customers.fold(0, (a, x) => a + max(0, s.balance(x.id)));
+
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: Scaffold(
+        appBar: AppBar(
+          leading: const Padding(padding: EdgeInsets.all(8), child: Logo()),
+          title: GestureDetector(onTap: hidden, child: Text(s.shop, style: const TextStyle(fontWeight: FontWeight.w900))),
+          actions: [IconButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => SettingsPage(store: s))), icon: const Icon(Icons.settings_outlined))],
+        ),
+        body: ListView(
+          padding: const EdgeInsets.all(12),
+          children: [
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Expanded(child: Column(children: [const Text('إجمالي المتبقي'), Text(money(total), style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w900))])),
+                    Expanded(child: Column(children: [const Text('العملاء'), Text('${s.customers.length}', style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w900))])),
+                  ],
+                ),
+              ),
+            ),
+            TextField(decoration: const InputDecoration(hintText: 'بحث بالاسم أو الهاتف', prefixIcon: Icon(Icons.search)), onChanged: (v) => setState(() => q = v.trim())),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: [
+                ChoiceChip(label: const Text('الكل'), selected: filter == 'all', onSelected: (_) => setState(() => filter = 'all')),
+                ChoiceChip(label: const Text('عليهم دين'), selected: filter == 'debt', onSelected: (_) => setState(() => filter = 'debt')),
+                ChoiceChip(label: const Text('مسدد'), selected: filter == 'paid', onSelected: (_) => setState(() => filter = 'paid')),
+              ],
+            ),
+            ...list.map(
+              (x) => Card(
+                child: ListTile(
+                  onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => CustomerPage(store: s, customer: x))),
+                  leading: CircleAvatar(child: Text(x.name.isEmpty ? '؟' : x.name.substring(0, 1))),
+                  title: Text(x.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('${x.phone}\n${s.risk(x.id)} • دين ${money(s.debts(x.id))} • مسدد ${money(s.paid(x.id))}'),
+                  isThreeLine: true,
+                  trailing: Text(money(s.balance(x.id)), style: const TextStyle(fontWeight: FontWeight.w900)),
+                ),
+              ),
+            ),
+          ],
+        ),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: s.locked ? () => Navigator.push(c, MaterialPageRoute(builder: (_) => ActivationPage(store: s))) : () => Navigator.push(c, MaterialPageRoute(builder: (_) => AddCustomerPage(store: s))),
+          icon: Icon(s.locked ? Icons.lock : Icons.person_add_alt_1),
+          label: Text(s.locked ? 'التفعيل' : 'عميل جديد'),
+        ),
+      ),
+    );
+  }
+}
+
+class AddCustomerPage extends StatefulWidget {
+  const AddCustomerPage({super.key, required this.store});
+  final Store store;
+
+  @override
+  State<AddCustomerPage> createState() => _AddCustomerPageState();
+}
+
+class _AddCustomerPageState extends State<AddCustomerPage> {
+  final n = TextEditingController(), p = TextEditingController(), l = TextEditingController();
+
+  @override
+  void dispose() {
+    n.dispose();
+    p.dispose();
+    l.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    if (n.text.trim().isEmpty) return;
+    await widget.store.saveCustomer(Customer(id: makeId(), name: n.text.trim(), phone: p.text.trim(), limitCents: parseCents(l.text)));
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext c) => PageForm(
+        title: 'إضافة عميل',
+        children: [
+          TextField(controller: n, decoration: const InputDecoration(labelText: 'اسم العميل')),
+          TextField(controller: p, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'رقم الهاتف')),
+          TextField(controller: l, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'السقف الائتماني اختياري')),
+          FilledButton(onPressed: save, child: const Text('حفظ العميل')),
+        ],
+      );
+}
+
+class PageForm extends StatelessWidget {
+  const PageForm({super.key, required this.title, required this.children});
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext c) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: Scaffold(
+          appBar: AppBar(title: Text(title)),
+          body: ListView(
+            padding: const EdgeInsets.all(16),
+            children: children.map((x) => Padding(padding: const EdgeInsets.only(bottom: 12), child: x)).toList(),
+          ),
+        ),
+      );
+}
+
+class CustomerPage extends StatelessWidget {
+  const CustomerPage({super.key, required this.store, required this.customer});
+  final Store store;
+  final Customer customer;
+
+  Future<void> openWa(BuildContext c) async {
+    final ok = await wa(customer.phone, store.whatsappMessage.replaceAll('[الاسم]', customer.name).replaceAll('[المبلغ]', money(store.balance(customer.id))));
+    if (!ok && c.mounted) ScaffoldMessenger.of(c).showSnackBar(const SnackBar(content: Text('تعذر فتح واتساب')));
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final rows = store.transactions.where((t) => t.customerId == customer.id).toList()..sort((a, b) => b.date.compareTo(a.date));
+
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: Scaffold(
+        appBar: AppBar(title: Text(customer.name)),
+        body: ListView(
+          padding: const EdgeInsets.all(12),
+          children: [
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  children: [
+                    const Icon(Icons.account_balance_wallet_rounded, size: 34, color: emerald),
+                    Text(money(store.balance(customer.id)), style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
+                    Text('الدين ${money(store.debts(customer.id))} • المسدد ${money(store.paid(customer.id))}'),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        FilledButton.icon(onPressed: () => openWa(c), icon: const Icon(Icons.chat_rounded), label: const Text('واتساب')),
+                        OutlinedButton.icon(onPressed: () => launchUrl(Uri.parse('tel:${customer.phone}')), icon: const Icon(Icons.phone_rounded), label: const Text('اتصال')),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            ...rows.map(
+              (t) => Card(
+                child: ListTile(
+                  leading: Icon(t.type == 'debt' ? Icons.arrow_downward_rounded : Icons.arrow_upward_rounded, color: t.type == 'debt' ? burgundy : mint),
+                  title: Text(t.type == 'debt' ? 'دَين' : 'تسديد'),
+                  subtitle: Text('${dateText(t.date)} ${timeText(t.date)}${t.note.isEmpty ? '' : ' • ${t.note}'}'),
+                  trailing: Text(money(t.amountCents), style: TextStyle(fontWeight: FontWeight.w900, color: t.type == 'debt' ? burgundy : mint)),
+                ),
+              ),
+            ),
+          ],
+        ),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: store.locked ? () => Navigator.push(c, MaterialPageRoute(builder: (_) => ActivationPage(store: store))) : () => Navigator.push(c, MaterialPageRoute(builder: (_) => AddTransactionPage(store: store, customer: customer))),
+          icon: Icon(store.locked ? Icons.lock : Icons.swap_horiz_rounded),
+          label: Text(store.locked ? 'التفعيل' : 'عملية جديدة'),
+        ),
+      ),
+    );
+  }
+}
+
+class AddTransactionPage extends StatefulWidget {
+  const AddTransactionPage({super.key, required this.store, required this.customer});
+  final Store store;
+  final Customer customer;
+
+  @override
+  State<AddTransactionPage> createState() => _AddTransactionPageState();
+}
+
+class _AddTransactionPageState extends State<AddTransactionPage> {
+  final a = TextEditingController(), n = TextEditingController();
+  String type = 'debt';
+
+  @override
+  void dispose() {
+    a.dispose();
+    n.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    final cents = parseCents(a.text);
+    if (cents <= 0) return;
+    final current = widget.store.balance(widget.customer.id);
+    if (type == 'debt' && widget.customer.limitCents > 0 && current + cents > widget.customer.limitCents) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('العملية تتجاوز السقف الائتماني')));
+      return;
+    }
+    await widget.store.saveTx(Tx(id: makeId(), customerId: widget.customer.id, type: type, amountCents: cents, date: DateTime.now(), note: n.text.trim()));
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext c) => PageForm(
+        title: type == 'debt' ? 'إضافة دَين' : 'تسجيل تسديد',
+        children: [
+          SegmentedButton<String>(
+            segments: const [ButtonSegment(value: 'debt', label: Text('دَين')), ButtonSegment(value: 'payment', label: Text('تسديد'))],
+            selected: {type},
+            onSelectionChanged: (v) => setState(() => type = v.first),
+          ),
+          TextField(controller: a, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'المبلغ')),
+          TextField(controller: n, decoration: const InputDecoration(labelText: 'البيان / الملاحظات')),
+          FilledButton(onPressed: save, child: const Text('حفظ العملية')),
+        ],
+      );
+}
+
+class VoiceDraftsPage extends StatefulWidget {
+  const VoiceDraftsPage({super.key, required this.store});
+  final Store store;
+
+  @override
+  State<VoiceDraftsPage> createState() => _VoiceDraftsPageState();
+}
+
+class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
+  final speech = stt.SpeechToText();
+  bool listening = false;
+  String live = '';
+
+  double? amount(String t) {
+    final m = RegExp(r'(\d+(?:[.,]\d+)?)').firstMatch(t);
+    if (m != null) return double.tryParse(m.group(1)!.replaceAll(',', '.'));
+    const w = {'مية': 100, 'مائة': 100, 'مئة': 100, 'ألف': 1000, 'الف': 1000, 'عشرة': 10, 'عشرين': 20, 'ثلاثين': 30, 'أربعين': 40, 'خمسين': 50, 'ستين': 60, 'سبعين': 70, 'ثمانين': 80, 'تسعين': 90};
+    for (final e in w.entries) {
+      if (t.contains(e.key)) return e.value.toDouble();
+    }
+    return null;
+  }
+
+  String findCustomer(String t) {
+    for (final c in widget.store.customers) {
+      if (t.contains(c.name)) return c.id;
+    }
+    return '';
+  }
+
+  Future<void> record() async {
+    if (listening) {
+      try {
+        await speech.stop();
+      } catch (_) {}
+      if (mounted) setState(() => listening = false);
+      return;
+    }
+    try {
+      final ok = await speech.initialize(
+        onStatus: (x) {
+          if (!mounted) return;
+          if (x == 'notListening') setState(() => listening = false);
+        },
+        onError: (_) {
+          if (mounted) setState(() => listening = false);
+        },
+      );
+      if (!ok) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون')));
+        return;
+      }
+      if (!mounted) return;
+      setState(() => listening = true);
+      await speech.listen(
+        localeId: 'ar-LY',
+        partialResults: true,
+        onResult: (r) {
+          if (!mounted) return;
+          setState(() => live = r.recognizedWords);
+          if (r.finalResult) {
+            final text = r.recognizedWords.trim();
+            if (text.isNotEmpty) {
+              widget.store.voiceDrafts.insert(0, VoiceDraft(id: makeId(), text: text, date: DateTime.now(), customerId: findCustomer(text), amountCents: ((amount(text) ?? 0) * 100).round(), note: text));
+              widget.store.saveLocal();
+            }
+            if (mounted) setState(() => listening = false);
+          }
+        },
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => listening = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ في التسجيل: $e')));
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    speech.stop();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final d = widget.store.voiceDrafts;
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: Scaffold(
+        appBar: AppBar(title: const Text('المسودات الصوتية')),
+        body: ListView(
+          padding: const EdgeInsets.all(12),
+          children: [
+            Card(
+              child: ListTile(
+                onTap: record,
+                leading: Icon(listening ? Icons.stop_circle : Icons.mic_rounded, color: listening ? burgundy : emerald),
+                title: Text(listening ? 'جارٍ الاستماع...' : 'تسجيل عملية صوتية'),
+                subtitle: Text(live.isEmpty ? 'مثال: محمد 150 بضاعة' : live),
+              ),
+            ),
+            ...d.map(
+              (x) => Card(
+                child: ListTile(
+                  title: Text(x.customerId.isEmpty ? 'عميل غير محدد' : widget.store.customers.firstWhere((c) => c.id == x.customerId, orElse: () => Customer(id: '', name: 'غير معروف', phone: '')).name),
+                  subtitle: Text('${x.text}\nالمبلغ: ${money(x.amountCents)}'),
+                  isThreeLine: true,
+                  onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => VoiceReviewPage(store: widget.store, draft: x))),
+                ),
+              ),
+            ),
+          ],
+        ),
+        floatingActionButton: FloatingActionButton(onPressed: record, child: Icon(listening ? Icons.stop : Icons.mic)),
+      ),
+    );
+  }
+}
+
+class VoiceReviewPage extends StatefulWidget {
+  const VoiceReviewPage({super.key, required this.store, required this.draft});
+  final Store store;
+  final VoiceDraft draft;
+
+  @override
+  State<VoiceReviewPage> createState() => _VoiceReviewPageState();
+}
+
+class _VoiceReviewPageState extends State<VoiceReviewPage> {
+  late TextEditingController a, n;
+  String customerId = '', type = 'debt';
+
+  @override
+  void initState() {
+    super.initState();
+    a = TextEditingController(text: widget.draft.amountCents > 0 ? (widget.draft.amountCents / 100).toStringAsFixed(2) : '');
+    n = TextEditingController(text: widget.draft.note);
+    customerId = widget.draft.customerId;
+  }
+
+  @override
+  void dispose() {
+    a.dispose();
+    n.dispose();
+    super.dispose();
+  }
+
+  Future<void> approve() async {
+    final cents = parseCents(a.text);
+    final matches = widget.store.customers.where((x) => x.id == customerId);
+    if (matches.isEmpty || cents <= 0) return;
+    final c = matches.first;
+    if (type == 'debt' && c.limitCents > 0 && widget.store.balance(c.id) + cents > c.limitCents) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('العملية تتجاوز السقف الائتماني')));
+      return;
+    }
+    await widget.store.saveTx(Tx(id: makeId(), customerId: c.id, type: type, amountCents: cents, date: DateTime.now(), note: n.text.trim()));
+    widget.store.voiceDrafts.removeWhere((x) => x.id == widget.draft.id);
+    await widget.store.saveLocal();
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext c) => PageForm(
+        title: 'مراجعة التسجيل الصوتي',
+        children: [
+          Card(child: Padding(padding: const EdgeInsets.all(14), child: Text(widget.draft.text, style: const TextStyle(fontWeight: FontWeight.bold)))),
+          DropdownButtonFormField<String>(
+            value: customerId.isEmpty ? null : customerId,
+            decoration: const InputDecoration(labelText: 'الزبون'),
+            items: widget.store.customers.map((x) => DropdownMenuItem(value: x.id, child: Text(x.name))).toList(),
+            onChanged: (v) => setState(() => customerId = v ?? ''),
+          ),
+          SegmentedButton<String>(
+            segments: const [ButtonSegment(value: 'debt', label: Text('دَين')), ButtonSegment(value: 'payment', label: Text('تسديد'))],
+            selected: {type},
+            onSelectionChanged: (v) => setState(() => type = v.first),
+          ),
+          TextField(controller: a, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'المبلغ')),
+          TextField(controller: n, maxLines: 2, decoration: const InputDecoration(labelText: 'البيان')),
+          FilledButton(onPressed: approve, child: const Text('اعتماد وحفظ')),
+        ],
+      );
+}
+
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key, required this.store});
+  final Store store;
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  late TextEditingController shop, msg;
+
+  @override
+  void initState() {
+    super.initState();
+    shop = TextEditingController(text: widget.store.shop);
+    msg = TextEditingController(text: widget.store.whatsappMessage);
+  }
+
+  @override
+  void dispose() {
+    shop.dispose();
+    msg.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    widget.store.shop = shop.text.trim().isEmpty ? 'DainPay — دَيْن' : shop.text.trim();
+    widget.store.whatsappMessage = msg.text.trim();
+    await widget.store.save();
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ الإعدادات')));
+  }
+
+  @override
+  Widget build(BuildContext c) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: Scaffold(
+          appBar: AppBar(title: const Text('الإعدادات')),
+          body: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              TextField(controller: shop, decoration: const InputDecoration(labelText: 'اسم المحل / النشاط')),
+              SwitchListTile(
+                value: widget.store.dark,
+                onChanged: (v) {
+                  setState(() => widget.store.dark = v);
+                  widget.store.save();
+                },
+                title: const Text('الوضع الداكن'),
+              ),
+              TextField(controller: msg, maxLines: 3, decoration: const InputDecoration(labelText: 'قالب رسالة واتساب')),
+              ListTile(title: const Text('رقم الجهاز'), subtitle: Text(widget.store.deviceId)),
+              FilledButton(onPressed: save, child: const Text('حفظ')),
+              OutlinedButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => VoiceDraftsPage(store: widget.store))), child: const Text('المسودات الصوتية')),
+              OutlinedButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => ActivationPage(store: widget.store))), child: const Text('التفعيل')),
+            ],
+          ),
+        ),
+      );
+}
+
+class ActivationPage extends StatefulWidget {
+  const ActivationPage({super.key, required this.store});
+  final Store store;
+
+  @override
+  State<ActivationPage> createState() => _ActivationPageState();
+}
+
+class _ActivationPageState extends State<ActivationPage> {
+  final code = TextEditingController();
+  bool busy = false;
+
+  @override
+  void dispose() {
+    code.dispose();
+    super.dispose();
+  }
+
+  Future<void> go() async {
+    setState(() => busy = true);
+    final ok = await widget.store.activateCode(code.text);
+    if (!mounted) return;
+    setState(() => busy = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok ? 'تم التفعيل الدائم بنجاح' : 'الكود غير صحيح أو مستخدم أو مخصص لجهاز آخر')));
+    if (ok) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext c) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: Scaffold(
+          appBar: AppBar(title: const Text('التفعيل')),
+          body: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Text(widget.store.activated ? 'التطبيق مفعّل بصفة دائمة' : 'التجربة المجانية: ${widget.store.trialDaysLeft} أيام', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              Text('رقم الجهاز: ${widget.store.deviceId}'),
+              FilledButton.icon(onPressed: () => wa('+218934951072', 'طلب تفعيل DainPay - رقم الجهاز: ${widget.store.deviceId}'), icon: const Icon(Icons.chat), label: const Text('طلب رمز عبر واتساب')),
+              TextField(controller: code, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'كود التفعيل')),
+              FilledButton(onPressed: busy ? null : go, child: Text(busy ? 'جارٍ التحقق...' : 'تفعيل دائم')),
+            ],
+          ),
+        ),
+      );
+}
+
+class AdminGate extends StatefulWidget {
+  const AdminGate({super.key, required this.store});
+  final Store store;
+
+  @override
+  State<AdminGate> createState() => _AdminGateState();
+}
+
+class _AdminGateState extends State<AdminGate> {
+  final pin = TextEditingController();
+  bool busy = false;
+
+  @override
+  void dispose() {
+    pin.dispose();
+    super.dispose();
+  }
+
+  Future<void> enter() async {
+    setState(() => busy = true);
+    final ok = await widget.store.checkAdmin(pin.text.trim());
+    if (!mounted) return;
+    setState(() => busy = false);
+    if (ok) {
+      Navigator.pop(context);
+      Navigator.push(context, MaterialPageRoute(builder: (_) => AdminPage(store: widget.store)));
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('رمز المالك غير صحيح أو لا توجد صلاحية')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) => AlertDialog(
+        title: const Text('لوحة المالك'),
+        content: TextField(controller: pin, obscureText: true, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'رمز المالك')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
+          FilledButton(onPressed: busy ? null : enter, child: Text(busy ? 'جارٍ التحقق...' : 'دخول')),
+        ],
+      );
+}
+
+class AdminPage extends StatefulWidget {
+  const AdminPage({super.key, required this.store});
+  final Store store;
+
+  @override
+  State<AdminPage> createState() => _AdminPageState();
+}
+
+class _AdminPageState extends State<AdminPage> {
+  final device = TextEditingController();
+  String result = '';
+  bool busy = false;
+
+  @override
+  void dispose() {
+    device.dispose();
+    super.dispose();
+  }
+
+  Future<void> generate() async {
+    if (device.text.trim().isEmpty) return;
+    setState(() => busy = true);
+    final r = await widget.store.generateCode(device.text);
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+      result = r ?? 'تعذر التوليد';
+    });
+  }
+
+  @override
+  Widget build(BuildContext c) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: Scaffold(
+          appBar: AppBar(title: const Text('إدارة التفعيل')),
+          body: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              TextField(controller: device, decoration: const InputDecoration(labelText: 'Device ID')),
+              FilledButton(onPressed: busy ? null : generate, child: Text(busy ? 'جارٍ التوليد...' : 'توليد رمز')),
+              if (result.isNotEmpty)
+                Card(
+                  child: ListTile(
+                    title: const Text('رمز التفعيل'),
+                    subtitle: Text(result, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
+                    trailing: result.length == 6 ? IconButton(onPressed: () => wa('+218934951072', 'رمز تفعيل DainPay: $result'), icon: const Icon(Icons.send)) : null,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+}

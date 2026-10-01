@@ -28,6 +28,11 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Reconstruct Modern Android Platform
+        run: |
+          rm -rf android
+          flutter create . --project-name=dainpay --platforms=android --org=com.example.dainpay
+
       - name: Install dependencies
         run: flutter pub get
 

@@ -1613,7 +1613,6 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
 
       await speech.listen(
         localeId: 'ar-LY',
-        listenOptions: stt.SpeechListenOptions(partialResults: true),
         onResult: (result) async {
           if (!mounted) return;
           setState(() => live = result.recognizedWords);

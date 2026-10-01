@@ -1,21 +1,43 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read, write: if signedIn() && request.auth.uid == userId;
+
       match /customers/{customerId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow read, write: if signedIn() && request.auth.uid == userId;
       }
+
       match /transactions/{txId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
-      }
-      match /activationCodes/{codeId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow read, write: if signedIn() && request.auth.uid == userId;
       }
     }
 
     match /activation_codes/{codeId} {
-      allow read, create, update, delete: if false;
+      // Activation is intentionally document-by-document; the app never lists this collection.
+      allow get: if signedIn() && resource.data.used != true;
+
+      // The hidden owner panel creates a one-time code. The local PIN remains a UI gate;
+      // a production-grade admin authorization should eventually move to custom claims/server logic.
+      allow create: if signedIn()
+        && request.resource.data.used == false
+        && request.resource.data.deviceId is string
+        && request.resource.data.deviceId.size() > 0
+        && request.resource.data.createdByUid == request.auth.uid;
+
+      // A code can only be consumed once, and the consuming UID/device must be recorded.
+      allow update: if signedIn()
+        && resource.data.used == false
+        && request.resource.data.used == true
+        && request.resource.data.usedUid == request.auth.uid
+        && request.resource.data.usedDeviceId == resource.data.deviceId
+        && request.resource.data.usedAt is timestamp;
+
+      allow delete: if false;
     }
   }
 }

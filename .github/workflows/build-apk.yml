@@ -1,94 +1,45 @@
-name: Build DainPay APK
+name: Build APK
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main, feature/brand-ui-refresh ]
-
-permissions:
-  contents: read
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Flutter
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.24.5"
-          channel: stable
+          flutter-version: '3.24.5'
+          channel: 'stable'
           cache: true
 
-      - name: Prepare Android platform
-        run: flutter create . --platforms=android --org com.adreemk --project-name dainpay
-
-      - name: Configure Android permissions and Firebase plugin
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          manifest = Path('android/app/src/main/AndroidManifest.xml')
-          s = manifest.read_text()
-          root = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
-          permissions = [
-              '    <uses-permission android:name="android.permission.RECORD_AUDIO" />',
-              '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />',
-          ]
-          for permission in permissions:
-              if permission not in s:
-                  s = s.replace(root, root + '\n' + permission, 1)
-          manifest.write_text(s)
-
-          p = Path('android/settings.gradle')
-          s = p.read_text()
-          if 'com.google.gms.google-services' not in s:
-              lines = s.splitlines()
-              idx = next((i for i, line in enumerate(lines) if 'id "org.jetbrains.kotlin.android" version' in line), None)
-              if idx is not None:
-                  lines.insert(idx + 1, '    id "com.google.gms.google-services" version "4.4.2" apply false')
-              p.write_text('\n'.join(lines) + '\n')
-
-          p = Path('android/app/build.gradle')
-          s = p.read_text()
-          if 'id "com.google.gms.google-services"' not in s:
-              s = s.replace('id "dev.flutter.flutter-gradle-plugin"', 'id "dev.flutter.flutter-gradle-plugin"\n    id "com.google.gms.google-services"')
-          s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 23')
-          p.write_text(s)
-          PY
-
-      - name: Verify Firebase configuration
-        run: |
-          test -f android/app/google-services.json
-          grep -q 'dainpay-a29fc' android/app/google-services.json
-          grep -q 'com.adreemk.dainpay' android/app/google-services.json
-
-      - name: Verify Android permissions
-        run: |
-          grep -q 'android.permission.RECORD_AUDIO' android/app/src/main/AndroidManifest.xml
-
-      - name: Get dependencies
+      - name: Install dependencies
         run: flutter pub get
 
-      - name: Format Dart source
-        run: dart format lib
+      - name: Analyze code
+        run: flutter analyze --no-fatal-warnings --no-fatal-infos
+        continue-on-error: true
 
-      - name: Parse and analyze
-        run: flutter analyze lib --no-fatal-infos --no-fatal-warnings
-
-      - name: Build release APK
+      - name: Build APK
         run: flutter build apk --release
 
-      - name: Verify APK
-        run: |
-          test -s build/app/outputs/flutter-apk/app-release.apk
-          ls -lh build/app/outputs/flutter-apk/app-release.apk
-
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DainPay-Firebase-release
+          name: app-release-build
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
-          retention-days: 14

@@ -28,10 +28,13 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Clean and Install dependencies
+      - name: Reconstruct Modern Android Platform
         run: |
-          flutter clean
-          flutter pub get
+          rm -rf android
+          flutter create . --platforms=android --org=com.example.dainpay
+
+      - name: Install dependencies
+        run: flutter pub get
 
       - name: Analyze code
         run: flutter analyze --no-fatal-warnings --no-fatal-infos

@@ -14,7 +14,6 @@ const Color emerald = Color(0xFF0F5C6E);
 const Color mint = Color(0xFF2EC4B6);
 const Color burgundy = Color(0xFFE63946);
 
-// التعديل 1: تعديل فترة التجربة إلى 7 أيام بدلاً من 10
 const int trialLengthDays = 7;
 const String adminPin = '116936';
 const String appTitle = 'DainPay — دَيْن';
@@ -839,7 +838,7 @@ class DainPayApp extends StatelessWidget {
       scaffoldBackgroundColor:
           brightness == Brightness.light ? const Color(0xFFF6F9FA) : const Color(0xFF101719),
       appBarTheme: const AppBarTheme(centerTitle: true),
-      cardTheme: CardThemeData(
+      cardTheme: CardTheme(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         elevation: 1,
         margin: const EdgeInsets.symmetric(vertical: 5),
@@ -972,7 +971,6 @@ class _HomePageState extends State<HomePage> {
           child: Text(store.shop, style: const TextStyle(fontWeight: FontWeight.w900)),
         ),
         actions: [
-          // التعديل 2: إضافة زر الوصول السريع للتسجيل الصوتي في الواجهة
           IconButton(
             tooltip: 'المسودات الصوتية',
             icon: const Icon(Icons.mic_rounded, color: emerald),

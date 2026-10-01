@@ -36,11 +36,19 @@ jobs:
       - name: Set minSdkVersion to 23
         run: |
           sed -i 's/minSdkVersion .*/minSdkVersion 23/g' android/app/build.gradle || true
-          sed -i 's/minSdk = .*/minSdk = 23/g' android/app/build.gradle || true
           sed -i 's/flutter.minSdkVersion/23/g' android/app/build.gradle || true
 
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Generate App Launcher Icons
+        run: flutter pub run flutter_launcher_icons || true
+
+      - name: Add Permissions & Restore Firebase Config
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.RECORD_AUDIO"/>\n    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>' $MANIFEST
+          find . -name "google-services.json" -exec cp {} android/app/ \; || true
 
       - name: Analyze code
         run: flutter analyze --no-fatal-warnings --no-fatal-infos

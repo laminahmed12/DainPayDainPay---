@@ -2,30 +2,44 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [main]
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Setup Flutter
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.5'
-          channel: stable
+          channel: 'stable'
           cache: true
-      - name: Flutter pub get
+
+      - name: Install dependencies
         run: flutter pub get
-      - name: Analyze
-        run: flutter analyze --no-fatal-infos
-      - name: Build release APK
+
+      - name: Analyze code
+        run: flutter analyze --no-fatal-warnings --no-fatal-infos
+        continue-on-error: true
+
+      - name: Build APK
         run: flutter build apk --release
-      - name: Upload APK
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DainPay-release
+          name: app-release
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error

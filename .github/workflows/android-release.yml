@@ -2,7 +2,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed ]
   workflow_dispatch:

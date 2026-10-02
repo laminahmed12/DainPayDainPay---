@@ -877,7 +877,7 @@ class Store extends ChangeNotifier {
       final ref = activationCodesRef.doc(code);
 
       try {
-        await ref.create({
+        await ref.set({
           'deviceId': device,
           'used': false,
           'createdAt': FieldValue.serverTimestamp(),
@@ -885,7 +885,8 @@ class Store extends ChangeNotifier {
         });
         return code;
       } on FirebaseException catch (e) {
-        if (e.code == 'already-exists') continue;
+        // A six-digit collision is harmless; generate another candidate.
+        if (e.code == 'permission-denied') continue;
         debugPrint('Generate activation code error: ${e.code}: ${e.message}');
         return null;
       } catch (e) {

@@ -553,8 +553,15 @@ class Store extends ChangeNotifier {
       uid = user.uid;
       firebaseReady = true;
 
+      if (trialStart != null) {
+        await userRef.doc(uid).set({
+          'trialStart': Timestamp.fromDate(trialStart!),
+          'deviceId': deviceId,
+        }, SetOptions(merge: true));
+      }
+
       await pullCloud();
-      await loadActivation();
+      await loadAccountState();
 
       safeNotify();
     } catch (e, stack) {
@@ -565,21 +572,38 @@ class Store extends ChangeNotifier {
     }
   }
 
-  Future<void> loadActivation() async {
+  Future<void> loadAccountState() async {
     if (!firebaseReady || uid.isEmpty) return;
 
     try {
-      final snap = await userRef.doc(uid).get();
-      final data = snap.data();
+      final ref = userRef.doc(uid);
+      final snap = await ref.get();
+      final data = snap.data() ?? <String, dynamic>{};
 
-      if (data?['activated'] == true) {
+      if (data['trialStart'] is Timestamp) {
+        trialStart = (data['trialStart'] as Timestamp).toDate();
+        await _pref(() => prefs.setString(
+              'trial_start',
+              trialStart!.toIso8601String(),
+            ));
+      } else if (trialStart != null) {
+        await ref.set({
+          'trialStart': Timestamp.fromDate(trialStart!),
+          'deviceId': deviceId,
+          'activated': activated,
+        }, SetOptions(merge: true));
+      }
+
+      if (data['activated'] == true) {
         activated = true;
         await _pref(() => prefs.setBool('activated', true));
       }
     } catch (e) {
-      debugPrint('Activation state error: $e');
+      debugPrint('Account state error: $e');
     }
   }
+
+  Future<void> loadActivation() => loadAccountState();
 
   Future<void> pullCloud() async {
     if (!firebaseReady || uid.isEmpty) return;
@@ -835,25 +859,30 @@ class Store extends ChangeNotifier {
 
     final device = targetDevice.trim();
 
-    try {
-      for (var attempt = 0; attempt < 20; attempt++) {
-        final code = (100000 + Random.secure().nextInt(900000)).toString();
-        final ref = activationCodesRef.doc(code);
-        final exists = await ref.get();
+    // Do not call get() on a missing activation-code document: the Firestore
+    // rules intentionally permit reads only for existing unused codes.
+    // Instead, attempt the create directly and retry on the extremely unlikely
+    // six-digit collision.
+    for (var attempt = 0; attempt < 50; attempt++) {
+      final code = (100000 + Random.secure().nextInt(900000)).toString();
+      final ref = activationCodesRef.doc(code);
 
-        if (exists.exists) continue;
-
-        await ref.set({
+      try {
+        await ref.create({
           'deviceId': device,
           'used': false,
           'createdAt': FieldValue.serverTimestamp(),
           'createdByUid': uid,
         });
-
         return code;
+      } on FirebaseException catch (e) {
+        if (e.code == 'already-exists') continue;
+        debugPrint('Generate activation code error: ${e.code}: ${e.message}');
+        return null;
+      } catch (e) {
+        debugPrint('Generate activation code error: $e');
+        return null;
       }
-    } catch (e) {
-      debugPrint('Generate activation code error: $e');
     }
 
     return null;
@@ -1076,6 +1105,35 @@ class _HomePageState extends State<HomePage> {
                   trailing: IconButton(
                     onPressed: store.connectFirebase,
                     icon: const Icon(Icons.refresh),
+                  ),
+                ),
+              ),
+            if (!store.activated)
+              Card(
+                color: emerald.withOpacity(.08),
+                child: ListTile(
+                  leading: const Icon(Icons.timer_outlined, color: emerald),
+                  title: Text(
+                    store.locked
+                        ? 'انتهت الفترة التجريبية'
+                        : 'الفترة التجريبية: ${store.trialDaysLeft} يوم',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    store.locked
+                        ? 'فعّل التطبيق لمواصلة تسجيل العمليات.'
+                        : 'يمكنك تفعيل التطبيق في أي وقت برمز تفعيل دائم.',
+                  ),
+                  trailing: TextButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ActivationPage(store: store),
+                        ),
+                      );
+                    },
+                    child: Text(store.locked ? 'تفعيل' : 'عرض'),
                   ),
                 ),
               ),

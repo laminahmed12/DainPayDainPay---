@@ -7,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:url_launcher/url_launcher.dart';
@@ -207,6 +208,54 @@ Future<bool> makePhoneCall(String phone) async {
     debugPrint('Phone error: $e');
     return false;
   }
+}
+
+String buildAccountStatement(Store store, Customer customer) {
+  final items = store.transactions
+      .where((t) => t.customerId == customer.id)
+      .toList()
+    ..sort((a, b) => a.date.compareTo(b.date));
+
+  final debt = store.debts(customer.id);
+  final paid = store.paid(customer.id);
+  final balance = store.balance(customer.id);
+
+  final lines = <String>[
+    store.shop,
+    'كشف حساب',
+    '------------------------------',
+    'العميل: ${customer.name}',
+    if (customer.phone.trim().isNotEmpty) 'الهاتف: ${customer.phone.trim()}',
+    'التاريخ: ${dateText(DateTime.now())}',
+    '',
+    'إجمالي الديون: ${money(debt)}',
+    'إجمالي المسدد: ${money(paid)}',
+    'المتبقي: ${money(balance)}',
+    'الحالة: ${balance <= 0 ? 'مسدد' : 'عليه رصيد'}',
+    '',
+    'تفاصيل العمليات:',
+  ];
+
+  if (items.isEmpty) {
+    lines.add('لا توجد عمليات مسجلة.');
+  } else {
+    for (final item in items) {
+      final kind = item.type == 'debt' ? 'دَين' : 'تسديد';
+      final note = item.note.trim();
+      lines.add(
+        '${dateText(item.date)} ${timeText(item.date)} — $kind — ${money(item.amountCents)}'
+        '${note.isEmpty ? '' : ' — $note'}',
+      );
+    }
+  }
+
+  lines.addAll([
+    '',
+    '------------------------------',
+    'المتبقي المطلوب: ${money(balance)}',
+  ]);
+
+  return lines.join('\\n');
 }
 
 // -----------------------------------------------------------------------------
@@ -1343,6 +1392,21 @@ class CustomerPage extends StatelessWidget {
                         label: const Text('واتساب'),
                       ),
                       OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => AccountStatementPage(
+                                store: store,
+                                customer: customer,
+                              ),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.receipt_long_rounded),
+                        label: const Text('كشف الحساب'),
+                      ),
+                      OutlinedButton.icon(
                         onPressed: () async {
                           final ok = await makePhoneCall(customer.phone);
                           if (!ok && context.mounted) {
@@ -1409,6 +1473,84 @@ class CustomerPage extends StatelessWidget {
               },
         icon: Icon(store.locked ? Icons.lock : Icons.swap_horiz_rounded),
         label: Text(store.locked ? 'التفعيل' : 'عملية جديدة'),
+      ),
+    );
+  }
+}
+
+class AccountStatementPage extends StatelessWidget {
+  const AccountStatementPage({
+    super.key,
+    required this.store,
+    required this.customer,
+  });
+
+  final Store store;
+  final Customer customer;
+
+  Future<void> copyStatement(BuildContext context) async {
+    final text = buildAccountStatement(store, customer);
+    await Clipboard.setData(ClipboardData(text: text));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تم نسخ كشف الحساب')),
+      );
+    }
+  }
+
+  Future<void> sendStatement(BuildContext context) async {
+    final text = buildAccountStatement(store, customer);
+    final ok = await launchWhatsApp(customer.phone, text);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تعذر فتح واتساب')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final statement = buildAccountStatement(store, customer);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('كشف الحساب'),
+        actions: [
+          IconButton(
+            tooltip: 'نسخ الكشف',
+            onPressed: () => copyStatement(context),
+            icon: const Icon(Icons.copy_all_rounded),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: SelectableText(
+                statement,
+                textDirection: TextDirection.rtl,
+                style: const TextStyle(
+                  fontSize: 15,
+                  height: 1.7,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: () => sendStatement(context),
+            icon: const Icon(Icons.send_rounded),
+            label: const Text('إرسال الكشف للزبون عبر واتساب'),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => copyStatement(context),
+            icon: const Icon(Icons.content_copy_rounded),
+            label: const Text('نسخ كشف الحساب'),
+          ),
+        ],
       ),
     );
   }

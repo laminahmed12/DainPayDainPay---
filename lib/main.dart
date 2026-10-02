@@ -553,15 +553,24 @@ class Store extends ChangeNotifier {
       uid = user.uid;
       firebaseReady = true;
 
-      if (trialStart != null) {
+      // Load the cloud account state first. This prevents a reinstall/new local
+      // trial_start from overwriting the original trial start date.
+      await loadAccountState();
+
+      if (trialStart == null) {
+        trialStart = DateTime.now();
+        await _pref(() => prefs.setString(
+              'trial_start',
+              trialStart!.toIso8601String(),
+            ));
         await userRef.doc(uid).set({
           'trialStart': Timestamp.fromDate(trialStart!),
           'deviceId': deviceId,
+          'activated': activated,
         }, SetOptions(merge: true));
       }
 
       await pullCloud();
-      await loadAccountState();
 
       safeNotify();
     } catch (e, stack) {

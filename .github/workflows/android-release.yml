@@ -39,6 +39,9 @@ jobs:
           flutter create . --project-name=dainpay --platforms=android --org=com.adreemk
           mkdir -p android/app
           cp /tmp/google-services.json android/app/google-services.json
+          # flutter create generates a default widget_test.dart that expects MyApp.
+          # DainPay has its own application entry point, so remove the generated test.
+          rm -f test/widget_test.dart
 
       - name: Configure Android SDK and Firebase Gradle plugin
         run: |

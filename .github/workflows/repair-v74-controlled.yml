@@ -2,7 +2,7 @@ name: DainPay v74 Controlled Repair
 
 on:
   push:
-    branches: [ repair-v74-controlled ]
+    branches: [ repair-v74-controlled-4 ]
 
 permissions:
   contents: write
@@ -44,7 +44,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add lib/main.dart firestore.rules pubspec.yaml
           git diff --cached --quiet || git commit -m "chore: apply controlled DainPay v74 repair"
-          git push origin HEAD:repair-v74-controlled
+          git push origin HEAD:repair-v74-controlled-4
 
       - name: Reconstruct Android platform
         run: |

@@ -2,7 +2,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, dainpay-v74-fixes ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed ]
   workflow_dispatch:
@@ -27,6 +27,9 @@ jobs:
           flutter-version: '3.24.5'
           channel: stable
           cache: true
+
+      - name: Apply DainPay v74 safety patch
+        run: python3 tool/apply_v74_fixes.py
 
       - name: Preserve Firebase configuration
         run: |

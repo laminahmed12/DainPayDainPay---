@@ -1,0 +1,104 @@
+name: DainPay v74 Controlled Repair v2
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [ main ]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  repair-and-build:
+    if: github.event.pull_request.head.ref == 'repair-v74-controlled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: repair-v74-controlled
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.5'
+          channel: stable
+          cache: true
+
+      - name: Preserve Firebase configuration
+        run: |
+          test -f android/app/google-services.json
+          cp android/app/google-services.json /tmp/google-services.json
+
+      - name: Normalize repair-script anchor detection
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tool/repair_v74_controlled.py')
+          s = p.read_text(encoding='utf-8')
+          old = "start = s.find('  Future<void> connectFirebase() async {')\nend = s.find('  CollectionReference', start)"
+          new = "m = re.search(r'  Future<void>\\s+connectFirebase\\(\\)\\s*async\\s*\\{', s)\nstart = m.start() if m else -1\nend = s.find('  CollectionReference', start)"
+          if old not in s:
+              raise SystemExit('SCRIPT_ANCHOR_REWRITE_NOT_FOUND')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Apply controlled source repair
+        run: python3 tool/repair_v74_controlled.py
+
+      - name: Commit repaired source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/main.dart firestore.rules pubspec.yaml
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: apply controlled DainPay v74 repair"
+            git push origin HEAD:repair-v74-controlled
+          fi
+
+      - name: Reconstruct Android platform
+        run: |
+          rm -rf android
+          flutter create . --project-name=dainpay --platforms=android --org=com.adreemk
+          mkdir -p android/app
+          cp /tmp/google-services.json android/app/google-services.json
+          rm -f test/widget_test.dart
+
+      - name: Configure Firebase Gradle plugin
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          settings = Path('android/settings.gradle')
+          text = settings.read_text()
+          if 'com.google.gms.google-services' not in text:
+              text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services" version "4.4.2" apply false', 1)
+          settings.write_text(text)
+          app = Path('android/app/build.gradle')
+          text = app.read_text()
+          if 'id "com.google.gms.google-services"' not in text:
+              text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services"', 1)
+          text = text.replace('flutter.minSdkVersion', '23')
+          app.write_text(text)
+          PY
+
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Verify Firebase package
+        run: grep -q 'com.adreemk.dainpay' android/app/google-services.json
+      - name: Analyze
+        run: flutter analyze --no-fatal-warnings --no-fatal-infos
+      - name: Build Release APK
+        run: flutter build apk --release
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dainpay-v74-controlled-release-v2
+          path: build/app/outputs/flutter-apk/app-release.apk

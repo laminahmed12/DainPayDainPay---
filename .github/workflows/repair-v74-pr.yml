@@ -1,41 +1,65 @@
-name: DainPay Android Release
+name: DainPay v74 Controlled PR Repair
 
 on:
-  push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4 ]
   pull_request:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, repair-v74-controlled-4 ]
-  workflow_dispatch:
+    types: [opened, synchronize]
+    branches: [ main ]
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
-  build:
+  repair-and-build:
+    if: github.event.pull_request.head.ref == 'repair-v74-controlled'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout PR branch
         uses: actions/checkout@v4
+        with:
+          ref: repair-v74-controlled
+          fetch-depth: 0
+
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.5'
           channel: stable
           cache: true
+
       - name: Preserve Firebase configuration
         run: |
           test -f android/app/google-services.json
           cp android/app/google-services.json /tmp/google-services.json
-      - name: Reconstruct Android platform with the registered Firebase package
+
+      - name: Apply controlled source repair
+        run: python3 tool/repair_v74_controlled.py
+
+      - name: Commit repaired source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/main.dart firestore.rules pubspec.yaml
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: apply controlled DainPay v74 repair"
+            git push origin HEAD:repair-v74-controlled
+          fi
+
+      - name: Reconstruct Android platform
         run: |
           rm -rf android
           flutter create . --project-name=dainpay --platforms=android --org=com.adreemk
           mkdir -p android/app
           cp /tmp/google-services.json android/app/google-services.json
           rm -f test/widget_test.dart
-      - name: Configure Android SDK and Firebase Gradle plugin
+
+      - name: Configure Firebase Gradle plugin
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -51,31 +75,17 @@ jobs:
           text = text.replace('flutter.minSdkVersion', '23')
           app.write_text(text)
           PY
+
       - name: Install dependencies
         run: flutter pub get
-      - name: Verify Firebase configuration
-        run: |
-          test -f android/app/google-services.json
-          grep -q 'com.adreemk.dainpay' android/app/google-services.json
-      - name: Add required Android permissions
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          manifest = Path('android/app/src/main/AndroidManifest.xml')
-          text = manifest.read_text()
-          permissions = ['android.permission.INTERNET','android.permission.RECORD_AUDIO','android.permission.MODIFY_AUDIO_SETTINGS']
-          insert = ''.join(f'    <uses-permission android:name="{p}"/>\n' for p in permissions)
-          if 'android.permission.INTERNET' not in text:
-              end = text.find('>')
-              text = text[:end + 1] + '\n' + insert + text[end + 1:]
-          manifest.write_text(text)
-          PY
-      - name: Analyze code
+      - name: Verify Firebase package
+        run: grep -q 'com.adreemk.dainpay' android/app/google-services.json
+      - name: Analyze
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
-      - name: Build release APK
+      - name: Build Release APK
         run: flutter build apk --release
-      - name: Upload APK artifact
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v74-release
+          name: dainpay-v74-controlled-release
           path: build/app/outputs/flutter-apk/app-release.apk

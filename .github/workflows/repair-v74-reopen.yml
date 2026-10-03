@@ -1,0 +1,73 @@
+name: DainPay v74 Controlled Repair v3
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [ main ]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  repair-and-build:
+    if: github.event.pull_request.head.ref == 'repair-v74-controlled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: repair-v74-controlled
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.5'
+          channel: stable
+          cache: true
+      - name: Preserve Firebase configuration
+        run: cp android/app/google-services.json /tmp/google-services.json
+      - name: Normalize and run repair
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tool/repair_v74_controlled.py')
+          s=p.read_text()
+          old="start = s.find('  Future<void> connectFirebase() async {')\nend = s.find('  CollectionReference', start)"
+          new="m = re.search(r'  Future<void>\\s+connectFirebase\\(\\)\\s*async\\s*\\{', s)\nstart = m.start() if m else -1\nend = s.find('  CollectionReference', start)"
+          if old in s: p.write_text(s.replace(old,new,1))
+          PY
+          python3 tool/repair_v74_controlled.py
+      - name: Commit repaired source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/main.dart firestore.rules pubspec.yaml
+          if ! git diff --cached --quiet; then git commit -m "chore: apply controlled DainPay v74 repair"; git push origin HEAD:repair-v74-controlled; fi
+      - name: Reconstruct Android
+        run: |
+          rm -rf android
+          flutter create . --project-name=dainpay --platforms=android --org=com.adreemk
+          mkdir -p android/app
+          cp /tmp/google-services.json android/app/google-services.json
+          rm -f test/widget_test.dart
+      - name: Configure Firebase Gradle plugin
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('android/settings.gradle'); s=p.read_text();
+          if 'com.google.gms.google-services' not in s: s=s.replace('plugins {','plugins {\n    id "com.google.gms.google-services" version "4.4.2" apply false',1)
+          p.write_text(s)
+          p=Path('android/app/build.gradle'); s=p.read_text();
+          if 'id "com.google.gms.google-services"' not in s: s=s.replace('plugins {','plugins {\n    id "com.google.gms.google-services"',1)
+          p.write_text(s.replace('flutter.minSdkVersion','23'))
+          PY
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-warnings --no-fatal-infos
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dainpay-v74-controlled-release-v3
+          path: build/app/outputs/flutter-apk/app-release.apk

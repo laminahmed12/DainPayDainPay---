@@ -2,7 +2,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4 ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed ]
   workflow_dispatch:
@@ -10,101 +10,72 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.5'
           channel: stable
           cache: true
-
       - name: Preserve Firebase configuration
         run: |
           test -f android/app/google-services.json
           cp android/app/google-services.json /tmp/google-services.json
-
       - name: Reconstruct Android platform with the registered Firebase package
         run: |
           rm -rf android
           flutter create . --project-name=dainpay --platforms=android --org=com.adreemk
           mkdir -p android/app
           cp /tmp/google-services.json android/app/google-services.json
-          # flutter create generates a default widget_test.dart that expects MyApp.
-          # DainPay has its own application entry point, so remove the generated test.
           rm -f test/widget_test.dart
-
       - name: Configure Android SDK and Firebase Gradle plugin
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           settings = Path('android/settings.gradle')
           text = settings.read_text()
           if 'com.google.gms.google-services' not in text:
-              marker = 'plugins {'
-              text = text.replace(
-                  marker,
-                  marker + '\n    id "com.google.gms.google-services" version "4.4.2" apply false',
-                  1,
-              )
+              text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services" version "4.4.2" apply false', 1)
           settings.write_text(text)
-
           app = Path('android/app/build.gradle')
           text = app.read_text()
           if 'id "com.google.gms.google-services"' not in text:
-              text = text.replace(
-                  'plugins {',
-                  'plugins {\n    id "com.google.gms.google-services"',
-                  1,
-              )
+              text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services"', 1)
           text = text.replace('flutter.minSdkVersion', '23')
           app.write_text(text)
           PY
-
       - name: Install dependencies
         run: flutter pub get
-
       - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json
           grep -q 'com.adreemk.dainpay' android/app/google-services.json
-
       - name: Add required Android permissions
         run: |
           python3 - <<'PY'
           from pathlib import Path
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           text = manifest.read_text()
-          permissions = [
-              'android.permission.INTERNET',
-              'android.permission.RECORD_AUDIO',
-              'android.permission.MODIFY_AUDIO_SETTINGS',
-          ]
+          permissions = ['android.permission.INTERNET','android.permission.RECORD_AUDIO','android.permission.MODIFY_AUDIO_SETTINGS']
           insert = ''.join(f'    <uses-permission android:name="{p}"/>\n' for p in permissions)
           if 'android.permission.INTERNET' not in text:
               end = text.find('>')
               text = text[:end + 1] + '\n' + insert + text[end + 1:]
           manifest.write_text(text)
           PY
-
       - name: Analyze code
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
-
       - name: Build release APK
         run: flutter build apk --release
-
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-release
+          name: dainpay-v74-release
           path: build/app/outputs/flutter-apk/app-release.apk

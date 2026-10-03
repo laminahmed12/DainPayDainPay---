@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   repair-build-test:
@@ -62,3 +61,5 @@ jobs:
         with:
           name: dainpay-v74-fixed-controlled-release
           path: build/app/outputs/flutter-apk/app-release.apk
+
+# Validation branch only; do not merge until the APK passes the requested tests.

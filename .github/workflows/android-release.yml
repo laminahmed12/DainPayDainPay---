@@ -64,6 +64,10 @@ jobs:
           PY
       - name: Install dependencies
         run: flutter pub get
+      - name: Apply encrypted Google Drive backup integration
+        run: |
+          python3 tool/add_drive_backup.py
+          dart format lib/main.dart lib/backup_service.dart
       - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json
@@ -88,5 +92,5 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v75-release
+          name: dainpay-v75-backup-release
           path: build/app/outputs/flutter-apk/app-release.apk

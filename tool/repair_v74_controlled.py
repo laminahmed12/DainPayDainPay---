@@ -134,3 +134,4 @@ else:
 
 MAIN.write_text(s, encoding='utf-8')
 print('v74 controlled repair applied successfully')
+# Trigger a fresh controlled validation run; no production branch changes are made here.

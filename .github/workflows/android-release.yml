@@ -38,7 +38,7 @@ jobs:
       - name: Apply approved DainPay launcher icon
         run: |
           mkdir -p android/app/src/main/res/drawable-nodpi
-          cp assets/icon_source/dainpay_icon.png android/app/src/main/res/drawable-nodpi/dainpay_icon.png
+          base64 -d assets/icon_source/dainpay_icon.jpg.b64 > android/app/src/main/res/drawable-nodpi/dainpay_icon.jpg
           python3 - <<'PY'
           from pathlib import Path
           manifest = Path('android/app/src/main/AndroidManifest.xml')

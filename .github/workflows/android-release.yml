@@ -2,7 +2,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4 ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75 ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed ]
   workflow_dispatch:
@@ -35,6 +35,17 @@ jobs:
           mkdir -p android/app
           cp /tmp/google-services.json android/app/google-services.json
           rm -f test/widget_test.dart
+      - name: Apply approved DainPay launcher icon
+        run: |
+          mkdir -p android/app/src/main/res/drawable-nodpi
+          cp assets/icon_source/dainpay_icon.png android/app/src/main/res/drawable-nodpi/dainpay_icon.png
+          python3 - <<'PY'
+          from pathlib import Path
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text()
+          text = text.replace('android:icon="@mipmap/ic_launcher"', 'android:icon="@drawable/dainpay_icon"')
+          manifest.write_text(text)
+          PY
       - name: Configure Android SDK and Firebase Gradle plugin
         run: |
           python3 - <<'PY'
@@ -77,5 +88,5 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v74-release
+          name: dainpay-v75-release
           path: build/app/outputs/flutter-apk/app-release.apk

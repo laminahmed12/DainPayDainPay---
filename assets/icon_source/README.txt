@@ -1,0 +1,1 @@
+Approved DainPay launcher icon source is the user-provided 1536x1536 image from the 2026-10-04 project discussion. Android launcher icon assets are generated from this source on branch icon-dainpay-v75.

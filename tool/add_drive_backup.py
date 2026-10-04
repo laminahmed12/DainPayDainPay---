@@ -3,34 +3,55 @@ from pathlib import Path
 p = Path('lib/main.dart')
 s = p.read_text(encoding='utf-8')
 
-imp = "import 'package:firebase_core/firebase_core.dart';\n"
 if "import 'backup_service.dart';" not in s:
-    s = s.replace(imp, imp + "import 'backup_service.dart';\n", 1)
+    s = s.replace(
+        "import 'package:firebase_core/firebase_core.dart';\n",
+        "import 'package:firebase_core/firebase_core.dart';\nimport 'backup_service.dart';\n",
+        1,
+    )
 
-field_anchor = "  bool isAdmin = false;\n"
-fields = """  bool isAdmin = false;\n\n  final DainPayBackupService backupService = DainPayBackupService();\n  String backupRecoveryCode = '';\n  DateTime? lastBackupAt;\n"""
 if 'final DainPayBackupService backupService' not in s:
-    if field_anchor not in s:
+    anchor = '  bool isAdmin = false;\n'
+    replacement = '''  bool isAdmin = false;
+
+  final DainPayBackupService backupService = DainPayBackupService();
+  String backupRecoveryCode = '';
+  DateTime? lastBackupAt;
+'''
+    if anchor not in s:
         raise SystemExit('STORE_FIELDS_ANCHOR_NOT_FOUND')
-    s = s.replace(field_anchor, fields, 1)
+    s = s.replace(anchor, replacement, 1)
 
-load_anchor = "    store.deviceId = store.prefs.getString('device_id') ?? '';\n"
-load_add = """    store.deviceId = store.prefs.getString('device_id') ?? '';\n    store.backupRecoveryCode = store.prefs.getString('backup_recovery_code') ?? '';\n    final lastBackup = store.prefs.getString('last_backup_at');\n    store.lastBackupAt = lastBackup == null ? null : DateTime.tryParse(lastBackup);\n"""
-if 'backup_recovery_code' not in s:
-    if load_anchor not in s:
+if "backup_recovery_code" not in s:
+    anchor = "    store.deviceId = store.prefs.getString('device_id') ?? '';\n"
+    replacement = '''    store.deviceId = store.prefs.getString('device_id') ?? '';
+    store.backupRecoveryCode = store.prefs.getString('backup_recovery_code') ?? '';
+    final lastBackup = store.prefs.getString('last_backup_at');
+    store.lastBackupAt = lastBackup == null ? null : DateTime.tryParse(lastBackup);
+'''
+    if anchor not in s:
         raise SystemExit('LOAD_ANCHOR_NOT_FOUND')
-    s = s.replace(load_anchor, load_add, 1)
+    s = s.replace(anchor, replacement, 1)
 
-# Dispose backup HTTP client together with Store.
-dispose_anchor = "  @override\n  void dispose() {\n    _disposed = true;\n    super.dispose();\n  }"
-dispose_new = """  @override\n  void dispose() {\n    _disposed = true;\n    backupService.dispose();\n    super.dispose();\n  }"""
 if 'backupService.dispose();' not in s:
-    if dispose_anchor not in s:
+    anchor = '''  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }'''
+    replacement = '''  @override
+  void dispose() {
+    _disposed = true;
+    backupService.dispose();
+    super.dispose();
+  }'''
+    if anchor not in s:
         raise SystemExit('DISPOSE_ANCHOR_NOT_FOUND')
-    s = s.replace(dispose_anchor, dispose_new, 1)
+    s = s.replace(anchor, replacement, 1)
 
-methods_anchor = "  Future<void> syncAll() async {\n"
-methods = r'''  Future<String> ensureBackupRecoveryCode() async {
+if 'Future<DainPayBackupResult> backupToGoogleDrive()' not in s:
+    anchor = '  Future<void> syncAll() async {\n'
+    methods = '''  Future<String> ensureBackupRecoveryCode() async {
     if (backupRecoveryCode.trim().isEmpty) {
       backupRecoveryCode = backupService.generateRecoveryCode();
       await _pref(() => prefs.setString('backup_recovery_code', backupRecoveryCode));
@@ -74,7 +95,6 @@ methods = r'''  Future<String> ensureBackupRecoveryCode() async {
       if (payload['schema'] != 1 || payload['app'] != 'DainPay') {
         return const DainPayBackupResult(success: false, message: 'ملف النسخة الاحتياطية غير صالح');
       }
-
       final rawCustomers = payload['customers'];
       final rawTransactions = payload['transactions'];
       final rawDrafts = payload['voiceDrafts'];
@@ -95,15 +115,9 @@ methods = r'''  Future<String> ensureBackupRecoveryCode() async {
         if (item is Map) restoredDrafts.add(VoiceDraft.fromJson(Map<String, dynamic>.from(item)));
       }
 
-      customers
-        ..clear()
-        ..addAll(restoredCustomers);
-      transactions
-        ..clear()
-        ..addAll(restoredTransactions);
-      voiceDrafts
-        ..clear()
-        ..addAll(restoredDrafts);
+      customers..clear()..addAll(restoredCustomers);
+      transactions..clear()..addAll(restoredTransactions);
+      voiceDrafts..clear()..addAll(restoredDrafts);
       shop = '${payload['shop'] ?? shop}'.trim().isEmpty ? shop : '${payload['shop']}'.trim();
       whatsappMessage = '${payload['whatsappMessage'] ?? whatsappMessage}';
       dark = payload['dark'] == true;
@@ -113,20 +127,27 @@ methods = r'''  Future<String> ensureBackupRecoveryCode() async {
       await saveLocal();
       safeNotify();
       return const DainPayBackupResult(success: true, message: 'تمت استعادة بيانات DainPay بنجاح');
-    } catch (e) {
+    } catch (_) {
       return const DainPayBackupResult(success: false, message: 'تعذر فك النسخة الاحتياطية. تحقق من رمز الاسترداد.');
     }
   }
 
 '''
-if 'Future<DainPayBackupResult> backupToGoogleDrive()' not in s:
-    if methods_anchor not in s:
+    if anchor not in s:
         raise SystemExit('SYNC_ANCHOR_NOT_FOUND')
-    s = s.replace(methods_anchor, methods + methods_anchor, 1)
+    s = s.replace(anchor, methods + anchor, 1)
 
-# Add backup/restore controls to SettingsPage.
-settings_anchor = """          OutlinedButton(\n            onPressed: () {\n              Navigator.push(\n                context,\n                MaterialPageRoute(builder: (_) => VoiceDraftsPage(store: store)),\n              );\n            },\n            child: const Text('المسودات الصوتية'),\n          ),\n"""
-settings_insert = settings_anchor + r'''          Card(
+if 'إنشاء / تحديث النسخة الاحتياطية' not in s:
+    anchor = '''          OutlinedButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => ActivationPage(store: store)),
+              );
+            },
+            child: const Text('التفعيل'),
+          ),'''
+    backup_ui = '''          Card(
             child: Column(
               children: [
                 const ListTile(
@@ -151,7 +172,7 @@ settings_insert = settings_anchor + r'''          Card(
                         builder: (_) => AlertDialog(
                           title: const Text('تم تأمين النسخة'),
                           content: SelectableText(
-                            'تم حفظ نسخة مشفرة في حساب Google.\n\nرمز الاسترداد الخاص بك:\n${store.backupRecoveryCode}\n\nاحفظ هذا الرمز خارج الهاتف. بدونه لا يمكن فك النسخة بعد تغيير الجهاز.',
+                            'تم حفظ نسخة مشفرة في حساب Google.\\n\\nرمز الاسترداد الخاص بك:\\n${store.backupRecoveryCode}\\n\\nاحفظ هذا الرمز خارج الهاتف. بدونه لا يمكن فك النسخة بعد تغيير الجهاز.',
                           ),
                           actions: [
                             TextButton(onPressed: () => Navigator.pop(context), child: const Text('حفظت الرمز')),
@@ -197,11 +218,9 @@ settings_insert = settings_anchor + r'''          Card(
             ),
           ),
 '''
-if 'إنشاء / تحديث النسخة الاحتياطية' not in s:
-    if settings_anchor not in s:
+    if anchor not in s:
         raise SystemExit('SETTINGS_ANCHOR_NOT_FOUND')
-    s = s.replace(settings_anchor, settings_insert, 1)
+    s = s.replace(anchor, backup_ui + anchor, 1)
 
 p.write_text(s, encoding='utf-8')
 print('DRIVE_BACKUP_PATCH_OK')
-'''

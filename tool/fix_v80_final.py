@@ -4,7 +4,10 @@ import re
 main = Path('lib/main.dart')
 s = main.read_text(encoding='utf-8')
 
-pattern = re.compile(r"  Future<String\\?> generateCode\\(String targetDevice\\) async \\{.*?\\n  \\}\\n\\n  Future<bool> activateCode", re.S)
+start_i = s.find('  Future<String?> generateCode')
+end_i = s.find('  Future<bool> activateCode', start_i)
+if start_i < 0 or end_i < 0:
+    raise SystemExit('GENERATE_CODE_NOT_FOUND')
 replacement = '''  Future<String?> generateCode(String targetDevice) async {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
     for (var attempt = 0; attempt < 50; attempt++) {
@@ -32,11 +35,8 @@ replacement = '''  Future<String?> generateCode(String targetDevice) async {
     return null;
   }
 
-  Future<bool> activateCode'''
-if not pattern.search(s):
-    raise SystemExit('GENERATE_CODE_NOT_FOUND')
-s = pattern.sub(replacement, s, count=1)
-
+'''
+s = s[:start_i] + replacement + s[end_i:]
 tap = re.compile(r"  void hiddenAdmin\\(\\) \\{.*?\\n  \\}", re.S)
 tap_repl = '''  void hiddenAdmin() {
     final now = DateTime.now();

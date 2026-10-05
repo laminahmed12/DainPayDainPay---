@@ -1021,12 +1021,14 @@ class Store extends ChangeNotifier {
   Future<String?> generateCode() async {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
 
+    // Firestore rules intentionally do not allow reading a non-existent
+    // activation_codes document. Generate by CREATE directly, then retry on
+    // permission-denied (which can also mean the random code already exists
+    // and is protected by the rules).
     for (var attempt = 0; attempt < 50; attempt++) {
       final code = (100000 + Random.secure().nextInt(900000)).toString();
       final ref = activationCodesRef.doc(code);
       try {
-        final existing = await ref.get();
-        if (existing.exists) continue;
         await ref.set({
           'used': false,
           'createdAt': FieldValue.serverTimestamp(),
@@ -1035,7 +1037,10 @@ class Store extends ChangeNotifier {
         });
         return code;
       } on FirebaseException catch (e) {
-        if (e.code == 'already-exists') continue;
+        if (e.code == 'permission-denied' ||
+            e.code == 'already-exists') {
+          continue;
+        }
         debugPrint('Generate activation code error: ${e.code}: ${e.message}');
         return null;
       } catch (e) {
@@ -1164,14 +1169,20 @@ class _HomePageState extends State<HomePage> {
 
   void hiddenAdmin() {
     final now = DateTime.now();
-    if (lastTap == null || now.difference(lastTap!).inMilliseconds > 2000) {
+
+    // Exactly three consecutive rapid taps. A pause of more than 700 ms
+    // breaks the sequence, so three taps spread over seconds cannot unlock it.
+    if (lastTap == null ||
+        now.difference(lastTap!).inMilliseconds > 700) {
       taps = 0;
     }
+
     lastTap = now;
     taps++;
 
-    if (taps >= 3) {
+    if (taps == 3) {
       taps = 0;
+      lastTap = null;
       showDialog(
         context: context,
         builder: (_) => AdminGate(store: widget.store),

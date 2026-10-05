@@ -4,11 +4,11 @@ import re
 main = Path('lib/main.dart')
 s = main.read_text(encoding='utf-8')
 
-start_i = s.find('  Future<String?> generateCode')
+start_i = s.find('  Future<String?> generateCode(')
 end_i = s.find('  Future<bool> activateCode', start_i)
 if start_i < 0 or end_i < 0:
     raise SystemExit('GENERATE_CODE_NOT_FOUND')
-replacement = '''  Future<String?> generateCode(String targetDevice) async {
+replacement = '''  Future<String?> generateCode() async {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
     for (var attempt = 0; attempt < 50; attempt++) {
       final code = (100000 + Random.secure().nextInt(900000)).toString();
@@ -18,7 +18,7 @@ replacement = '''  Future<String?> generateCode(String targetDevice) async {
           'used': false,
           'createdAt': FieldValue.serverTimestamp(),
           'createdByUid': uid,
-          'deviceId': targetDevice.trim(),
+          'deviceId': deviceId,
         });
         return code;
       } on FirebaseException catch (e) {

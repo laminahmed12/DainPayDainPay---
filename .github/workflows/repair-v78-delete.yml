@@ -11,11 +11,8 @@ on:
 permissions:
   contents: write
 
-env:
-  FLUTTER_VERSION: '3.35.4'
-
 jobs:
-  patch-analyze-build:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,34 +23,26 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
+          flutter-version: '3.35.4'
           channel: stable
           cache: true
 
-      - name: Apply v78 deletion fix
-        shell: python
+      - name: Patch deletion logic
         run: |
+          python3 - <<'PY'
           from pathlib import Path
           import re
-
           p = Path('lib/main.dart')
           s = p.read_text(encoding='utf-8')
-
-          old = re.compile(
-              r"  Future<bool> deleteCustomer\(Customer customer\) async \{.*?\n  \}\n\n  Future<void> deleteVoiceDraft",
-              re.S,
-          )
-
-          new = '''  Future<bool> deleteCustomer(Customer customer) async {
-    // Safety rule: a customer can only be deleted when the local balance is zero.
+          pattern = re.compile(r"  Future<bool> deleteCustomer\(Customer customer\) async \{.*?\n  \}\n\n  Future<void> deleteVoiceDraft", re.S)
+          replacement = '''  Future<bool> deleteCustomer(Customer customer) async {
     if (balance(customer.id) != 0) return false;
     if (!firebaseReady || uid.isEmpty) return false;
 
     try {
-      // Push any locally recorded operations first, then force the verification
-      // read to come from the Firestore server rather than its offline cache.
+      // First push the current local ledger, then force the verification read
+      // against the Firestore server. Cached data must never authorize deletion.
       await syncAll();
-
       final txSnap = await transactionRef
           .where('customerId', isEqualTo: customer.id)
           .get(const GetOptions(source: Source.server));
@@ -71,7 +60,6 @@ jobs:
         cloudBalance += type == 'debt' ? amount : -amount;
       }
 
-      // Never delete when the authoritative server balance is not exactly zero.
       if (cloudBalance != 0) return false;
 
       final batch = FirebaseFirestore.instance.batch();
@@ -86,46 +74,35 @@ jobs:
       await saveLocal();
       safeNotify();
       return true;
-    } on FirebaseException catch (e) {
-      debugPrint('Delete customer Firebase error: ${e.code}: ${e.message}');
-      return false;
     } catch (e) {
-      debugPrint('Delete customer error: $e');
+      debugPrint('Delete customer verification/delete error: $e');
       return false;
     }
   }
 
   Future<void> deleteVoiceDraft'''
-
-          s2, n = old.subn(new, s, count=1)
+          s2, n = pattern.subn(replacement, s, count=1)
           if n != 1:
-              raise SystemExit('deleteCustomer method anchor not found')
-
-          # Make the confirmation text explicitly describe server verification.
-          s2 = s2.replace(
-              'سيتم حذف العميل وجميع عملياته بعد التحقق من أن الرصيد السحابي يساوي صفرًا.',
-              'سيتم التحقق من الرصيد من خادم DainPay مباشرة، ولن يتم الحذف إلا إذا كان الرصيد صفراً.',
-              1,
-          )
-
+              raise SystemExit('deleteCustomer anchor not found')
           p.write_text(s2, encoding='utf-8')
-          print('v78 deletion patch applied')
+          print('v78 patch applied')
+          PY
 
-      - name: Get dependencies
+      - name: Flutter pub get
         run: flutter pub get
 
-      - name: Analyze
+      - name: Flutter analyze
         run: flutter analyze
 
-      - name: Build Release APK
+      - name: Build release APK
         run: flutter build apk --release
 
       - name: Commit patched source
         run: |
-          git config user.name "DainPay Build Bot"
-          git config user.email "dainpay-build@users.noreply.github.com"
+          git config user.name 'DainPay Build Bot'
+          git config user.email 'dainpay-build@users.noreply.github.com'
           git add lib/main.dart
-          git commit -m "v78: fix cloud verification for zero-balance customer deletion [skip ci]" || exit 0
+          git commit -m 'v78: force server verification before zero-balance customer deletion [skip ci]' || true
           git push origin HEAD:repair-v78-delete-cloud-fix
 
       - name: Upload APK

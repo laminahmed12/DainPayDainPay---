@@ -1,0 +1,137 @@
+name: DainPay v78 Delete Cloud Fix
+
+on:
+  push:
+    branches:
+      - repair-v78-delete-cloud-fix
+    paths-ignore:
+      - lib/main.dart
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: '3.35.4'
+
+jobs:
+  patch-analyze-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Apply v78 deletion fix
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          p = Path('lib/main.dart')
+          s = p.read_text(encoding='utf-8')
+
+          old = re.compile(
+              r"  Future<bool> deleteCustomer\(Customer customer\) async \{.*?\n  \}\n\n  Future<void> deleteVoiceDraft",
+              re.S,
+          )
+
+          new = '''  Future<bool> deleteCustomer(Customer customer) async {
+    // Safety rule: a customer can only be deleted when the local balance is zero.
+    if (balance(customer.id) != 0) return false;
+    if (!firebaseReady || uid.isEmpty) return false;
+
+    try {
+      // Push any locally recorded operations first, then force the verification
+      // read to come from the Firestore server rather than its offline cache.
+      await syncAll();
+
+      final txSnap = await transactionRef
+          .where('customerId', isEqualTo: customer.id)
+          .get(const GetOptions(source: Source.server));
+
+      var cloudBalance = 0;
+      for (final doc in txSnap.docs) {
+        final data = doc.data();
+        final type = '${data['type'] ?? ''}';
+        final raw = data['amountCents'];
+        final amount = raw is num
+            ? raw.toInt()
+            : data['amount'] is num
+                ? ((data['amount'] as num).toDouble() * 100).round()
+                : 0;
+        cloudBalance += type == 'debt' ? amount : -amount;
+      }
+
+      // Never delete when the authoritative server balance is not exactly zero.
+      if (cloudBalance != 0) return false;
+
+      final batch = FirebaseFirestore.instance.batch();
+      for (final doc in txSnap.docs) {
+        batch.delete(doc.reference);
+      }
+      batch.delete(customerRef.doc(customer.id));
+      await batch.commit();
+
+      transactions.removeWhere((tx) => tx.customerId == customer.id);
+      customers.removeWhere((item) => item.id == customer.id);
+      await saveLocal();
+      safeNotify();
+      return true;
+    } on FirebaseException catch (e) {
+      debugPrint('Delete customer Firebase error: ${e.code}: ${e.message}');
+      return false;
+    } catch (e) {
+      debugPrint('Delete customer error: $e');
+      return false;
+    }
+  }
+
+  Future<void> deleteVoiceDraft'''
+
+          s2, n = old.subn(new, s, count=1)
+          if n != 1:
+              raise SystemExit('deleteCustomer method anchor not found')
+
+          # Make the confirmation text explicitly describe server verification.
+          s2 = s2.replace(
+              'سيتم حذف العميل وجميع عملياته بعد التحقق من أن الرصيد السحابي يساوي صفرًا.',
+              'سيتم التحقق من الرصيد من خادم DainPay مباشرة، ولن يتم الحذف إلا إذا كان الرصيد صفراً.',
+              1,
+          )
+
+          p.write_text(s2, encoding='utf-8')
+          print('v78 deletion patch applied')
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Build Release APK
+        run: flutter build apk --release
+
+      - name: Commit patched source
+        run: |
+          git config user.name "DainPay Build Bot"
+          git config user.email "dainpay-build@users.noreply.github.com"
+          git add lib/main.dart
+          git commit -m "v78: fix cloud verification for zero-balance customer deletion [skip ci]" || exit 0
+          git push origin HEAD:repair-v78-delete-cloud-fix
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dainpay-v78-delete-cloud-fix-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 90

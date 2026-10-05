@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 
@@ -25,11 +26,23 @@ class DainPayBackupService {
   final AesGcm _aes = AesGcm.with256bits();
 
   Future<String?> _accessToken() async {
-    GoogleSignInAccount? account = _google.currentUser;
-    account ??= await _google.signIn();
-    if (account == null) return null;
-    final authentication = await account.authentication;
-    return authentication.accessToken;
+    try {
+      GoogleSignInAccount? account = _google.currentUser;
+      account ??= await _google.signIn();
+      if (account == null) return null;
+      final authentication = await account.authentication;
+      return authentication.accessToken;
+    } on PlatformException catch (e) {
+      if (e.code == 'sign_in_failed' &&
+          (e.message ?? '').contains('api: 10')) {
+        throw StateError(
+          'إعداد Google Sign-In غير مكتمل (API 10). '
+          'أضف SHA-1 لشهادة إصدار التطبيق في Firebase، '
+          'فعّل Google Sign-In، ثم نزّل google-services.json الجديد.',
+        );
+      }
+      rethrow;
+    }
   }
 
   String generateRecoveryCode() {

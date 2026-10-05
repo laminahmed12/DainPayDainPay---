@@ -87,11 +87,6 @@ jobs:
         run: |
           python3 tool/google_only_storage.py
           dart format lib/main.dart
-      - name: Apply v80 final activation and Google Sign-In diagnostics
-        run: |
-          python3 tool/fix_v80_final.py
-          dart format lib/main.dart lib/backup_service.dart
-
       - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json

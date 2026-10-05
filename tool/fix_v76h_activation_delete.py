@@ -4,9 +4,10 @@ main = Path('lib/main.dart')
 text = main.read_text()
 old = "        await ref.create({"
 new = "        final existing = await ref.get();\n        if (existing.exists) continue;\n        await ref.set({"
-if old not in text:
-    raise SystemExit('unsupported activation create call not found')
-text = text.replace(old, new, 1)
+if old in text:
+    text = text.replace(old, new, 1)
+elif "await ref.set({" not in text:
+    raise SystemExit('activation generation block is neither old nor fixed')
 
 for item in [
     'Future<bool> deleteCustomer(Customer customer) async {',

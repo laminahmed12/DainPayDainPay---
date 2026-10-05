@@ -1025,7 +1025,9 @@ class Store extends ChangeNotifier {
       final code = (100000 + Random.secure().nextInt(900000)).toString();
       final ref = activationCodesRef.doc(code);
       try {
-        await ref.create({
+        final existing = await ref.get();
+        if (existing.exists) continue;
+        await ref.set({
           'used': false,
           'createdAt': FieldValue.serverTimestamp(),
           'createdByUid': uid,

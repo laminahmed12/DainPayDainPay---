@@ -2,10 +2,13 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75 ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -68,6 +71,15 @@ jobs:
         run: |
           python3 tool/add_drive_backup.py
           dart format lib/main.dart lib/backup_service.dart
+      - name: Apply v76 activation and customer deletion fixes
+        run: |
+          python3 tool/fix_v76_activation_delete.py
+          dart format lib/main.dart
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/main.dart firestore.rules
+          git diff --cached --quiet || git commit -m "Fix activation codes and zero-balance customer deletion [skip ci]"
+          git push origin HEAD:${GITHUB_REF_NAME}
       - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json
@@ -92,5 +104,5 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v75-backup-release
+          name: dainpay-v76-activation-delete-release
           path: build/app/outputs/flutter-apk/app-release.apk

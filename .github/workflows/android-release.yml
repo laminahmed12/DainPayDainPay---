@@ -2,7 +2,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed ]
   workflow_dispatch:
@@ -71,9 +71,13 @@ jobs:
         run: |
           python3 tool/add_drive_backup.py
           dart format lib/main.dart lib/backup_service.dart
-      - name: Validate v76 activation and customer deletion fixes
+      - name: Apply v76 activation and customer deletion baseline fixes
         run: |
           python3 tool/fix_v76h_activation_delete.py
+          dart format lib/main.dart
+      - name: Apply v77 authoritative customer deletion fix
+        run: |
+          python3 tool/fix_v77_customer_delete.py
           dart format lib/main.dart
       - name: Verify Firebase configuration
         run: |
@@ -99,5 +103,5 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v76-activation-delete-release
+          name: dainpay-v77-customer-delete-release
           path: build/app/outputs/flutter-apk/app-release.apk

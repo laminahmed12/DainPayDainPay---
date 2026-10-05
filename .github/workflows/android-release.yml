@@ -71,9 +71,9 @@ jobs:
         run: |
           python3 tool/add_drive_backup.py
           dart format lib/main.dart lib/backup_service.dart
-      - name: Apply v76f activation and customer deletion fixes
+      - name: Apply v76g activation and customer deletion fixes
         run: |
-          python3 tool/fix_v76f_activation_delete.py
+          python3 tool/fix_v76g_activation_delete.py
           dart format lib/main.dart
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

@@ -79,6 +79,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add lib/main.dart firestore.rules
           git diff --cached --quiet || git commit -m "Fix activation codes and zero-balance customer deletion [skip ci]"
+          git fetch origin "${GITHUB_REF_NAME}"
+          git rebase "origin/${GITHUB_REF_NAME}"
           git push origin HEAD:${GITHUB_REF_NAME}
       - name: Verify Firebase configuration
         run: |

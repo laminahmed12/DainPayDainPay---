@@ -1029,6 +1029,7 @@ class Store extends ChangeNotifier {
           'used': false,
           'createdAt': FieldValue.serverTimestamp(),
           'createdByUid': uid,
+          'deviceId': deviceId,
         });
         return code;
       } on FirebaseException catch (e) {

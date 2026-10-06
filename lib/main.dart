@@ -428,7 +428,7 @@ class Store extends ChangeNotifier {
   DateTime? lastBackupAt;
   DateTime? lastLocalBackupAt;
   String backupGoogleEmail = '';
-  final FlutterSecureStorage secureStorage = FlutterSecureStorage();
+  final FlutterSecureStorage secureStorage = const FlutterSecureStorage();
 
   bool _disposed = false;
   bool _syncQueued = false;
@@ -2566,9 +2566,9 @@ class _SettingsPageState extends State<SettingsPage> {
           Card(
             child: Column(
               children: [
-                const ListTile(
-                  leading: Icon(Icons.cloud_sync_rounded),
-                  title: Text('النسخة الاحتياطية الآمنة'),
+                ListTile(
+                  leading: const Icon(Icons.cloud_sync_rounded),
+                  title: const Text('النسخة الاحتياطية الآمنة'),
                   subtitle: Text(
                     store.backupGoogleEmail.isEmpty
                         ? 'نسخة محلية مشفرة تلقائياً + نسخة Google Drive للحساب الذي تختاره.'
@@ -2581,15 +2581,17 @@ class _SettingsPageState extends State<SettingsPage> {
                     leading: const Icon(Icons.phone_android_rounded),
                     title: const Text('آخر نسخة محلية تلقائية'),
                     subtitle: Text(
-                        '${dateText(store.lastLocalBackupAt!)} ${timeText(store.lastLocalBackupAt!)}'),
+                      '${dateText(store.lastLocalBackupAt!)} ${timeText(store.lastLocalBackupAt!)}',
+                    ),
                   ),
                 if (store.lastBackupAt != null)
                   ListTile(
                     dense: true,
                     leading: const Icon(Icons.history_rounded),
-                    title: const Text('آخر نسخة ناجحة'),
+                    title: const Text('آخر نسخة Google Drive ناجحة'),
                     subtitle: Text(
-                        '${dateText(store.lastBackupAt!)} ${timeText(store.lastBackupAt!)}'),
+                      '${dateText(store.lastBackupAt!)} ${timeText(store.lastBackupAt!)}',
+                    ),
                   ),
                 OutlinedButton.icon(
                   onPressed: () async {
@@ -2602,21 +2604,23 @@ class _SettingsPageState extends State<SettingsPage> {
                           title: const Text('تم تأمين النسخة'),
                           content: SelectableText(
                             'تم تأمين البيانات محلياً.\n' +
-                            (result.cloudSaved
-                                ? 'نسخة Google Drive: ${result.accountEmail ?? 'الحساب المحدد'}\n'
-                                : 'تعذر Google Drive حالياً، لكن النسخة المحلية محفوظة.\n') +
-                            '\nرمز الاسترداد الخاص بك:\n${store.backupRecoveryCode}\n\nاحفظ هذا الرمز خارج الهاتف. بدونه لا يمكن فك النسخة بعد تغيير الجهاز.',
+                                (result.cloudSaved
+                                    ? 'نسخة Google Drive: ${result.accountEmail ?? 'الحساب المحدد'}\n'
+                                    : 'تعذر Google Drive حالياً، لكن النسخة المحلية محفوظة.\n') +
+                                '\nرمز الاسترداد الخاص بك:\n${store.backupRecoveryCode}\n\nاحفظ هذا الرمز خارج الهاتف. بدونه لا يمكن فك النسخة بعد تغيير الجهاز.',
                           ),
                           actions: [
                             TextButton(
-                                onPressed: () => Navigator.pop(context),
-                                child: const Text('حفظت الرمز')),
+                              onPressed: () => Navigator.pop(context),
+                              child: const Text('حفظت الرمز'),
+                            ),
                           ],
                         ),
                       );
                     } else {
                       ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text(result.message)));
+                        SnackBar(content: Text(result.message)),
+                      );
                     }
                   },
                   icon: const Icon(Icons.cloud_upload_rounded),
@@ -2633,17 +2637,22 @@ class _SettingsPageState extends State<SettingsPage> {
                           controller: controller,
                           autofocus: true,
                           textCapitalization: TextCapitalization.characters,
-                          decoration:
-                              const InputDecoration(labelText: 'رمز الاسترداد'),
+                          decoration: const InputDecoration(
+                            labelText: 'رمز الاسترداد',
+                          ),
                         ),
                         actions: [
                           TextButton(
-                              onPressed: () => Navigator.pop(context),
-                              child: const Text('إلغاء')),
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text('إلغاء'),
+                          ),
                           FilledButton(
-                              onPressed: () => Navigator.pop(
-                                  context, controller.text.trim()),
-                              child: const Text('استعادة')),
+                            onPressed: () => Navigator.pop(
+                              context,
+                              controller.text.trim(),
+                            ),
+                            child: const Text('استعادة'),
+                          ),
                         ],
                       ),
                     );
@@ -2651,13 +2660,16 @@ class _SettingsPageState extends State<SettingsPage> {
                     if (recovery == null ||
                         recovery.isEmpty ||
                         !context.mounted) return;
-                    final result = await store.restoreFromGoogleDrive(recovery);
+                    final result =
+                        await store.restoreFromGoogleDrive(recovery);
                     if (!context.mounted) return;
-                    ScaffoldMessenger.of(context)
-                        .showSnackBar(SnackBar(content: Text(result.message)));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(result.message)),
+                    );
                   },
                   icon: const Icon(Icons.cloud_download_rounded),
                   label: const Text('استعادة البيانات من Google Drive'),
+                ),
                 OutlinedButton.icon(
                   onPressed: () async {
                     final controller = TextEditingController();
@@ -2669,8 +2681,9 @@ class _SettingsPageState extends State<SettingsPage> {
                           controller: controller,
                           autofocus: true,
                           textCapitalization: TextCapitalization.characters,
-                          decoration:
-                              const InputDecoration(labelText: 'رمز الاسترداد'),
+                          decoration: const InputDecoration(
+                            labelText: 'رمز الاسترداد',
+                          ),
                         ),
                         actions: [
                           TextButton(
@@ -2707,13 +2720,14 @@ class _SettingsPageState extends State<SettingsPage> {
                     if (!context.mounted) return;
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
-                        content: Text('تم تسجيل الخروج من حساب Google. عند النسخ القادم اختر حساب العميل.'),
+                        content: Text(
+                          'تم تسجيل الخروج من حساب Google. عند النسخ القادم اختر حساب العميل.',
+                        ),
                       ),
                     );
                   },
                   icon: const Icon(Icons.switch_account_rounded),
                   label: const Text('تغيير حساب Google للنسخ الاحتياطي'),
-                ),
                 ),
               ],
             ),

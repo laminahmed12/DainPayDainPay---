@@ -1021,15 +1021,12 @@ class Store extends ChangeNotifier {
   Future<String?> generateCode() async {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
 
-    // Firestore rules intentionally do not allow reading a non-existent
-    // activation_codes document. Generate by CREATE directly, then retry on
-    // permission-denied (which can also mean the random code already exists
-    // and is protected by the rules).
-    for (var attempt = 0; attempt < 50; attempt++) {
+    // CREATE avoids treating a random-code collision as an UPDATE.
+    for (var attempt = 0; attempt < 100; attempt++) {
       final code = (100000 + Random.secure().nextInt(900000)).toString();
       final ref = activationCodesRef.doc(code);
       try {
-        await ref.set({
+        await ref.create({
           'used': false,
           'createdAt': FieldValue.serverTimestamp(),
           'createdByUid': uid,
@@ -1037,10 +1034,7 @@ class Store extends ChangeNotifier {
         });
         return code;
       } on FirebaseException catch (e) {
-        if (e.code == 'permission-denied' ||
-            e.code == 'already-exists') {
-          continue;
-        }
+        if (e.code == 'already-exists') continue;
         debugPrint('Generate activation code error: ${e.code}: ${e.message}');
         return null;
       } catch (e) {
@@ -2771,7 +2765,14 @@ class _AdminPageState extends State<AdminPage> {
     }
 
     setState(() => busy = true);
-    final generated = await widget.store.generateCode();
+    String? generated;
+    try {
+      generated = await widget.store.generateCode();
+    } on FirebaseException catch (e) {
+      generated = 'Firebase ${e.code}: ${e.message ?? ''}'.trim();
+    } catch (e) {
+      generated = 'خطأ: $e';
+    }
 
     if (!mounted) return;
     setState(() {

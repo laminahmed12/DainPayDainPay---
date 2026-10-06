@@ -1040,10 +1040,10 @@ class Store extends ChangeNotifier {
       } on FirebaseException catch (e) {
         if (e.code == 'already-exists') continue;
         debugPrint('Generate activation code error: ${e.code}: ${e.message}');
-        return null;
+        rethrow;
       } catch (e) {
         debugPrint('Generate activation code error: $e');
-        return null;
+        rethrow;
       }
     }
     return null;

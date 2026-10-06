@@ -1,4 +1,5 @@
 name: DainPay Android Release
+# Final release validation trigger
 
 on:
   push:

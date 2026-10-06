@@ -94,11 +94,14 @@ jobs:
           grep -q 'com.adreemk.dainpay' android/app/google-services.json
 
       - name: Deploy Firestore rules when Firebase CI credentials are configured
-        if: ${{ secrets.FIREBASE_TOKEN != '' }}
         env:
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
         run: |
-          npx --yes firebase-tools deploy --only firestore:rules --project dainpay-a29fc --token "$FIREBASE_TOKEN"
+          if [ -n "$FIREBASE_TOKEN" ]; then
+            npx --yes firebase-tools deploy --only firestore:rules --project dainpay-a29fc --token "$FIREBASE_TOKEN"
+          else
+            echo "FIREBASE_TOKEN is not configured; skipping live Firestore rules deployment."
+          fi
 
       - name: Add required Android permissions
         run: |

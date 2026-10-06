@@ -7,25 +7,20 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow read, write: if signedIn() && request.auth.uid == userId;
+
       match /customers/{customerId} {
         allow read, write: if signedIn() && request.auth.uid == userId;
       }
+
       match /transactions/{txId} {
         allow read, write: if signedIn() && request.auth.uid == userId;
       }
     }
 
+    // Activation codes are server-managed only. Generation and redemption
+    // happen through authenticated Cloud Functions.
     match /activation_codes/{codeId} {
-      allow get: if signedIn() && resource.data.used != true;
-      allow create: if signedIn()
-        && request.resource.data.used == false
-        && request.resource.data.createdByUid == request.auth.uid;
-      allow update: if signedIn()
-        && resource.data.used == false
-        && request.resource.data.used == true
-        && request.resource.data.usedUid == request.auth.uid
-        && request.resource.data.usedAt is timestamp;
-      allow delete: if false;
+      allow read, write: if false;
     }
   }
 }

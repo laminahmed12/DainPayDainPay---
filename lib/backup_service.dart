@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
@@ -24,6 +25,34 @@ class DainPayBackupService {
   final GoogleSignIn _google = GoogleSignIn(scopes: const [_scope]);
   final http.Client _client = http.Client();
   final AesGcm _aes = AesGcm.with256bits();
+
+  Reference _cloudBackupRef(String userId) {
+    final storage = FirebaseStorage.instanceFor(
+      bucket: 'gs://dainpay-a29fc.firebasestorage.app',
+    );
+    return storage.ref().child('users/$userId/backups/DainPay_Backup.dpb');
+  }
+
+  Future<void> _backupToFirebaseStorage({
+    required String userId,
+    required String encrypted,
+  }) async {
+    if (userId.trim().isEmpty) throw StateError('معرّف المستخدم غير متاح');
+    await _cloudBackupRef(userId).putString(
+      encrypted,
+      format: PutStringFormat.raw,
+      metadata: SettableMetadata(contentType: _mime),
+    );
+  }
+
+  Future<String> _restoreFromFirebaseStorage(String userId) async {
+    if (userId.trim().isEmpty) throw StateError('معرّف المستخدم غير متاح');
+    final data = await _cloudBackupRef(userId).getData(5 * 1024 * 1024);
+    if (data == null || data.isEmpty) {
+      throw StateError('لم يتم العثور على نسخة سحابية');
+    }
+    return utf8.decode(data);
+  }
 
   Future<String?> _accessToken() async {
     try {
@@ -178,31 +207,61 @@ class DainPayBackupService {
   Future<DainPayBackupResult> backup({
     required Map<String, dynamic> payload,
     required String recoveryCode,
+    required String userId,
   }) async {
+    final encrypted = await encrypt(payload, recoveryCode);
+
+    // Google Drive is optional. A broken OAuth configuration must never
+    // prevent a user from making a secure cloud backup.
     try {
       final token = await _accessToken();
-      if (token == null) {
-        return const DainPayBackupResult(success: false, message: 'لم يتم تسجيل الدخول بحساب Google');
+      if (token != null) {
+        final existing = await _findFile(token);
+        await _upload(token, encrypted, fileId: existing);
+        return DainPayBackupResult(
+          success: true,
+          message: 'تم حفظ النسخة المشفرة في Google Drive',
+          recoveryCode: recoveryCode,
+        );
       }
-      final encrypted = await encrypt(payload, recoveryCode);
-      final existing = await _findFile(token);
-      await _upload(token, encrypted, fileId: existing);
+    } catch (e) {
+      debugPrint('Google Drive unavailable; using Firebase Storage: $e');
+    }
+
+    try {
+      await _backupToFirebaseStorage(userId: userId, encrypted: encrypted);
       return DainPayBackupResult(
         success: true,
-        message: 'تم حفظ النسخة المشفرة في Google Drive',
+        message: 'تم حفظ النسخة المشفرة سحابياً بأمان عبر Firebase.',
         recoveryCode: recoveryCode,
       );
     } catch (e) {
-      return DainPayBackupResult(success: false, message: 'فشل النسخ الاحتياطي: $e');
+      return DainPayBackupResult(
+        success: false,
+        message: 'فشل النسخ الاحتياطي السحابي: $e',
+      );
     }
   }
 
-  Future<Map<String, dynamic>> restore({required String recoveryCode}) async {
-    final token = await _accessToken();
-    if (token == null) throw Exception('لم يتم تسجيل الدخول بحساب Google');
-    final fileId = await _findFile(token);
-    if (fileId == null) throw Exception('لم يتم العثور على نسخة DainPay الاحتياطية');
-    final encrypted = await _download(token, fileId);
+  Future<Map<String, dynamic>> restore({
+    required String recoveryCode,
+    required String userId,
+  }) async {
+    String? encrypted;
+
+    try {
+      final token = await _accessToken();
+      if (token != null) {
+        final fileId = await _findFile(token);
+        if (fileId != null) {
+          encrypted = await _download(token, fileId);
+        }
+      }
+    } catch (e) {
+      debugPrint('Google Drive restore unavailable; using Firebase Storage: $e');
+    }
+
+    encrypted ??= await _restoreFromFirebaseStorage(userId);
     return decrypt(encrypted, recoveryCode);
   }
 

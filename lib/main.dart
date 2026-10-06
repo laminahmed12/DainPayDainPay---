@@ -6,6 +6,8 @@ import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_functions/firebase_functions.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'backup_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -424,6 +426,9 @@ class Store extends ChangeNotifier {
   final DainPayBackupService backupService = DainPayBackupService();
   String backupRecoveryCode = '';
   DateTime? lastBackupAt;
+  DateTime? lastLocalBackupAt;
+  String backupGoogleEmail = '';
+  final FlutterSecureStorage secureStorage = const FlutterSecureStorage();
 
   bool _disposed = false;
   bool _syncQueued = false;
@@ -440,10 +445,25 @@ class Store extends ChangeNotifier {
     store.activated = store.prefs.getBool('activated') ?? false;
     store.deviceId = store.prefs.getString('device_id') ?? '';
     store.backupRecoveryCode =
-        store.prefs.getString('backup_recovery_code') ?? '';
+        await store.secureStorage.read(key: 'dainpay_backup_recovery') ?? '';
+    if (store.backupRecoveryCode.isEmpty) {
+      final legacyRecovery = store.prefs.getString('backup_recovery_code');
+      if (legacyRecovery != null && legacyRecovery.isNotEmpty) {
+        store.backupRecoveryCode = legacyRecovery;
+        await store.secureStorage.write(
+          key: 'dainpay_backup_recovery',
+          value: legacyRecovery,
+        );
+        await store.prefs.remove('backup_recovery_code');
+      }
+    }
     final lastBackup = store.prefs.getString('last_backup_at');
     store.lastBackupAt =
         lastBackup == null ? null : DateTime.tryParse(lastBackup);
+    final lastLocal = store.prefs.getString('last_local_backup_at');
+    store.lastLocalBackupAt =
+        lastLocal == null ? null : DateTime.tryParse(lastLocal);
+    store.backupGoogleEmail = store.prefs.getString('backup_google_email') ?? '';
 
     if (store.deviceId.isEmpty) {
       store.deviceId =
@@ -676,6 +696,25 @@ class Store extends ChangeNotifier {
     await _pref(() => prefs.setString('whatsappMessage', whatsappMessage));
     await _pref(() => prefs.setBool('dark', dark));
     await _pref(() => prefs.setBool('activated', activated));
+
+    // Redundant encrypted local snapshot. This runs on every local save so
+    // a damaged SharedPreferences record does not destroy the only copy.
+    try {
+      final recovery = await ensureBackupRecoveryCode();
+      final ok = await backupService.saveLocal(
+        payload: backupPayload(),
+        recoveryCode: recovery,
+      );
+      if (ok) {
+        lastLocalBackupAt = DateTime.now();
+        await _pref(() => prefs.setString(
+              'last_local_backup_at',
+              lastLocalBackupAt!.toIso8601String(),
+            ));
+      }
+    } catch (e) {
+      debugPrint('Automatic local backup error: $e');
+    }
   }
 
   Future<void> save() async {
@@ -764,8 +803,10 @@ class Store extends ChangeNotifier {
   Future<String> ensureBackupRecoveryCode() async {
     if (backupRecoveryCode.trim().isEmpty) {
       backupRecoveryCode = backupService.generateRecoveryCode();
-      await _pref(
-          () => prefs.setString('backup_recovery_code', backupRecoveryCode));
+      await secureStorage.write(
+        key: 'dainpay_backup_recovery',
+        value: backupRecoveryCode,
+      );
     }
     return backupRecoveryCode;
   }
@@ -791,14 +832,31 @@ class Store extends ChangeNotifier {
     final result = await backupService.backup(
       payload: backupPayload(),
       recoveryCode: recovery,
-      userId: uid,
     );
-    if (result.success) {
-      lastBackupAt = DateTime.now();
-      await _pref(() =>
-          prefs.setString('last_backup_at', lastBackupAt!.toIso8601String()));
-      safeNotify();
+
+    if (result.localSaved) {
+      lastLocalBackupAt = DateTime.now();
+      await _pref(() => prefs.setString(
+            'last_local_backup_at',
+            lastLocalBackupAt!.toIso8601String(),
+          ));
     }
+    if (result.cloudSaved) {
+      lastBackupAt = DateTime.now();
+      await _pref(() => prefs.setString(
+            'last_backup_at',
+            lastBackupAt!.toIso8601String(),
+          ));
+      backupGoogleEmail = result.accountEmail ?? '';
+      if (backupGoogleEmail.isNotEmpty) {
+        await _pref(() => prefs.setString(
+              'backup_google_email',
+              backupGoogleEmail,
+            ));
+      }
+    }
+
+    safeNotify();
     return result;
   }
 
@@ -807,68 +865,112 @@ class Store extends ChangeNotifier {
     try {
       final payload = await backupService.restore(
         recoveryCode: recoveryCode,
-        userId: uid,
       );
-      if (payload['schema'] != 1 || payload['app'] != 'DainPay') {
-        return const DainPayBackupResult(
-            success: false, message: 'ملف النسخة الاحتياطية غير صالح');
-      }
-      final rawCustomers = payload['customers'];
-      final rawTransactions = payload['transactions'];
-      final rawDrafts = payload['voiceDrafts'];
-      if (rawCustomers is! List ||
-          rawTransactions is! List ||
-          rawDrafts is! List) {
-        return const DainPayBackupResult(
-            success: false, message: 'النسخة الاحتياطية ناقصة أو تالفة');
-      }
-
-      final restoredCustomers = <Customer>[];
-      for (final item in rawCustomers) {
-        if (item is Map)
-          restoredCustomers
-              .add(Customer.fromJson(Map<String, dynamic>.from(item)));
-      }
-      final restoredTransactions = <Tx>[];
-      for (final item in rawTransactions) {
-        if (item is Map)
-          restoredTransactions
-              .add(Tx.fromJson(Map<String, dynamic>.from(item)));
-      }
-      final restoredDrafts = <VoiceDraft>[];
-      for (final item in rawDrafts) {
-        if (item is Map)
-          restoredDrafts
-              .add(VoiceDraft.fromJson(Map<String, dynamic>.from(item)));
-      }
-
-      customers
-        ..clear()
-        ..addAll(restoredCustomers);
-      transactions
-        ..clear()
-        ..addAll(restoredTransactions);
-      voiceDrafts
-        ..clear()
-        ..addAll(restoredDrafts);
-      shop = '${payload['shop'] ?? shop}'.trim().isEmpty
-          ? shop
-          : '${payload['shop']}'.trim();
-      whatsappMessage = '${payload['whatsappMessage'] ?? whatsappMessage}';
-      dark = payload['dark'] == true;
-      activated = payload['activated'] == true;
-      trialStart =
-          DateTime.tryParse('${payload['trialStart'] ?? ''}') ?? trialStart;
-
-      await saveLocal();
-      safeNotify();
-      return const DainPayBackupResult(
-          success: true, message: 'تمت استعادة بيانات DainPay بنجاح');
-    } catch (_) {
-      return const DainPayBackupResult(
-          success: false,
-          message: 'تعذر فك النسخة الاحتياطية. تحقق من رمز الاسترداد.');
+      return _applyBackupPayload(payload);
+    } catch (e) {
+      return DainPayBackupResult(
+        success: false,
+        message: 'تعذر استعادة النسخة: $e',
+      );
     }
+  }
+
+  Future<DainPayBackupResult> restoreFromLocalBackup(
+      String recoveryCode) async {
+    try {
+      final payload = await backupService.restoreLocal(recoveryCode);
+      return _applyBackupPayload(payload);
+    } catch (e) {
+      return DainPayBackupResult(
+        success: false,
+        message: 'تعذر استعادة النسخة المحلية: $e',
+      );
+    }
+  }
+
+  Future<DainPayBackupResult> _applyBackupPayload(
+      Map<String, dynamic> payload) async {
+    if (payload['schema'] != 1 && payload['schema'] != 2 ||
+        payload['app'] != 'DainPay') {
+      return const DainPayBackupResult(
+        success: false,
+        message: 'ملف النسخة الاحتياطية غير صالح',
+      );
+    }
+
+    final rawCustomers = payload['customers'];
+    final rawTransactions = payload['transactions'];
+    final rawDrafts = payload['voiceDrafts'];
+
+    if (rawCustomers is! List ||
+        rawTransactions is! List ||
+        rawDrafts is! List) {
+      return const DainPayBackupResult(
+        success: false,
+        message: 'النسخة الاحتياطية ناقصة أو تالفة',
+      );
+    }
+
+    final restoredCustomers = <Customer>[];
+    for (final item in rawCustomers) {
+      if (item is Map) {
+        restoredCustomers.add(
+          Customer.fromJson(Map<String, dynamic>.from(item)),
+        );
+      }
+    }
+
+    final restoredTransactions = <Tx>[];
+    for (final item in rawTransactions) {
+      if (item is Map) {
+        restoredTransactions.add(
+          Tx.fromJson(Map<String, dynamic>.from(item)),
+        );
+      }
+    }
+
+    final restoredDrafts = <VoiceDraft>[];
+    for (final item in rawDrafts) {
+      if (item is Map) {
+        restoredDrafts.add(
+          VoiceDraft.fromJson(Map<String, dynamic>.from(item)),
+        );
+      }
+    }
+
+    customers
+      ..clear()
+      ..addAll(restoredCustomers);
+    transactions
+      ..clear()
+      ..addAll(restoredTransactions);
+    voiceDrafts
+      ..clear()
+      ..addAll(restoredDrafts);
+
+    shop = '${payload['shop'] ?? shop}'.trim().isEmpty
+        ? shop
+        : '${payload['shop']}'.trim();
+    whatsappMessage = '${payload['whatsappMessage'] ?? whatsappMessage}';
+    dark = payload['dark'] == true;
+    activated = payload['activated'] == true;
+    trialStart =
+        DateTime.tryParse('${payload['trialStart'] ?? ''}') ?? trialStart;
+
+    await saveLocal();
+    safeNotify();
+
+    return const DainPayBackupResult(
+      success: true,
+      message: 'تمت استعادة بيانات DainPay بنجاح',
+    );
+  }
+
+  Future<void> changeGoogleBackupAccount() async {
+    await backupService.changeGoogleAccount();
+    backupGoogleEmail = '';
+    await _pref(() => prefs.remove('backup_google_email'));
+    safeNotify();
   }
 
   Future<void> syncAll() async {
@@ -985,37 +1087,25 @@ class Store extends ChangeNotifier {
     final clean = _digits(code).trim();
     if (clean.isEmpty) return false;
 
-    final ref = activationCodesRef.doc(clean);
-
     try {
-      final success = await FirebaseFirestore.instance
-          .runTransaction<bool>((transaction) async {
-        final snap = await transaction.get(ref);
-        if (!snap.exists) return false;
-
-        final data = snap.data();
-        if (data == null || data['used'] == true) return false;
-
-        transaction.update(ref, {
-          'used': true,
-          'usedAt': FieldValue.serverTimestamp(),
-          'usedUid': uid,
-        });
-
-        return true;
+      final callable = FirebaseFunctions.instance.httpsCallable(
+        'redeemActivationCode',
+      );
+      final result = await callable.call({
+        'code': clean,
+        'deviceId': deviceId,
       });
-
+      final data = result.data;
+      final success = data is Map && data['success'] == true;
       if (!success) return false;
-
-      await userRef.doc(uid).set({
-        'activated': true,
-        'activatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
 
       activated = true;
       await saveLocal();
       safeNotify();
       return true;
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('Activation function error: ${e.code}: ${e.message}');
+      return false;
     } catch (e) {
       debugPrint('Activation error: $e');
       return false;
@@ -1025,28 +1115,26 @@ class Store extends ChangeNotifier {
   Future<String?> generateCode() async {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
 
-    // CREATE avoids treating a random-code collision as an UPDATE.
-    for (var attempt = 0; attempt < 100; attempt++) {
-      final code = (100000 + Random.secure().nextInt(900000)).toString();
-      final ref = activationCodesRef.doc(code);
-      try {
-        await ref.create({
-          'used': false,
-          'createdAt': FieldValue.serverTimestamp(),
-          'createdByUid': uid,
-          'deviceId': deviceId,
-        });
-        return code;
-      } on FirebaseException catch (e) {
-        if (e.code == 'already-exists') continue;
-        debugPrint('Generate activation code error: ${e.code}: ${e.message}');
-        rethrow;
-      } catch (e) {
-        debugPrint('Generate activation code error: $e');
-        rethrow;
+    try {
+      final callable = FirebaseFunctions.instance.httpsCallable(
+        'generateActivationCode',
+      );
+      final result = await callable.call({
+        'adminPin': adminPin,
+        'deviceId': deviceId,
+      });
+      final data = result.data;
+      if (data is Map && data['code'] is String) {
+        return data['code'] as String;
       }
+      return null;
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('Generate activation function error: ${e.code}: ${e.message}');
+      rethrow;
+    } catch (e) {
+      debugPrint('Generate activation code error: $e');
+      rethrow;
     }
-    return null;
   }
 
   bool checkAdminLocal(String pin) {
@@ -2481,8 +2569,20 @@ class _SettingsPageState extends State<SettingsPage> {
                 const ListTile(
                   leading: Icon(Icons.cloud_sync_rounded),
                   title: Text('النسخة الاحتياطية الآمنة'),
-                  subtitle: Text('نسخة مشفرة في Google Drive الخاص بالحساب.'),
+                  subtitle: Text(
+                    store.backupGoogleEmail.isEmpty
+                        ? 'نسخة محلية مشفرة تلقائياً + نسخة Google Drive للحساب الذي تختاره.'
+                        : 'Google Drive: ${store.backupGoogleEmail}',
+                  ),
                 ),
+                if (store.lastLocalBackupAt != null)
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.phone_android_rounded),
+                    title: const Text('آخر نسخة محلية تلقائية'),
+                    subtitle: Text(
+                        '${dateText(store.lastLocalBackupAt!)} ${timeText(store.lastLocalBackupAt!)}'),
+                  ),
                 if (store.lastBackupAt != null)
                   ListTile(
                     dense: true,
@@ -2501,7 +2601,11 @@ class _SettingsPageState extends State<SettingsPage> {
                         builder: (_) => AlertDialog(
                           title: const Text('تم تأمين النسخة'),
                           content: SelectableText(
-                            'تم حفظ نسخة مشفرة في حساب Google.\n\nرمز الاسترداد الخاص بك:\n${store.backupRecoveryCode}\n\nاحفظ هذا الرمز خارج الهاتف. بدونه لا يمكن فك النسخة بعد تغيير الجهاز.',
+                            'تم تأمين البيانات محلياً.\n' +
+                            (result.cloudSaved
+                                ? 'نسخة Google Drive: ${result.accountEmail ?? 'الحساب المحدد'}\n'
+                                : 'تعذر Google Drive حالياً، لكن النسخة المحلية محفوظة.\n') +
+                            '\nرمز الاسترداد الخاص بك:\n${store.backupRecoveryCode}\n\nاحفظ هذا الرمز خارج الهاتف. بدونه لا يمكن فك النسخة بعد تغيير الجهاز.',
                           ),
                           actions: [
                             TextButton(
@@ -2554,6 +2658,62 @@ class _SettingsPageState extends State<SettingsPage> {
                   },
                   icon: const Icon(Icons.cloud_download_rounded),
                   label: const Text('استعادة البيانات من Google Drive'),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final controller = TextEditingController();
+                    final recovery = await showDialog<String>(
+                      context: context,
+                      builder: (_) => AlertDialog(
+                        title: const Text('استعادة النسخة المحلية'),
+                        content: TextField(
+                          controller: controller,
+                          autofocus: true,
+                          textCapitalization: TextCapitalization.characters,
+                          decoration:
+                              const InputDecoration(labelText: 'رمز الاسترداد'),
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text('إلغاء'),
+                          ),
+                          FilledButton(
+                            onPressed: () => Navigator.pop(
+                              context,
+                              controller.text.trim(),
+                            ),
+                            child: const Text('استعادة'),
+                          ),
+                        ],
+                      ),
+                    );
+                    controller.dispose();
+                    if (recovery == null ||
+                        recovery.isEmpty ||
+                        !context.mounted) return;
+                    final result =
+                        await store.restoreFromLocalBackup(recovery);
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(result.message)),
+                    );
+                  },
+                  icon: const Icon(Icons.phone_android_rounded),
+                  label: const Text('استعادة من النسخة المحلية'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    await store.changeGoogleBackupAccount();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('تم تسجيل الخروج من حساب Google. عند النسخ القادم اختر حساب العميل.'),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.switch_account_rounded),
+                  label: const Text('تغيير حساب Google للنسخ الاحتياطي'),
+                ),
                 ),
               ],
             ),

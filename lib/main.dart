@@ -791,6 +791,7 @@ class Store extends ChangeNotifier {
     final result = await backupService.backup(
       payload: backupPayload(),
       recoveryCode: recovery,
+      userId: uid,
     );
     if (result.success) {
       lastBackupAt = DateTime.now();
@@ -804,7 +805,10 @@ class Store extends ChangeNotifier {
   Future<DainPayBackupResult> restoreFromGoogleDrive(
       String recoveryCode) async {
     try {
-      final payload = await backupService.restore(recoveryCode: recoveryCode);
+      final payload = await backupService.restore(
+        recoveryCode: recoveryCode,
+        userId: uid,
+      );
       if (payload['schema'] != 1 || payload['app'] != 'DainPay') {
         return const DainPayBackupResult(
             success: false, message: 'ملف النسخة الاحتياطية غير صالح');

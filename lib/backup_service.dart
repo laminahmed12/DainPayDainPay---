@@ -1,86 +1,102 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart';
-
-import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'package:cryptography/cryptography.dart';
-import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
 class DainPayBackupResult {
-  const DainPayBackupResult({required this.success, this.message = '', this.recoveryCode});
+  const DainPayBackupResult({
+    required this.success,
+    this.message = '',
+    this.recoveryCode,
+    this.accountEmail,
+    this.localSaved = false,
+    this.cloudSaved = false,
+  });
 
   final bool success;
   final String message;
   final String? recoveryCode;
+  final String? accountEmail;
+  final bool localSaved;
+  final bool cloudSaved;
 }
 
 class DainPayBackupService {
   static const _scope = 'https://www.googleapis.com/auth/drive.appdata';
   static const _fileName = 'DainPay_Backup.dpb';
+  static const _localA = 'DainPay_Backup_A.dpb';
+  static const _localB = 'DainPay_Backup_B.dpb';
   static const _mime = 'application/octet-stream';
-  static const _schema = 1;
+  static const _schema = 2;
 
   final GoogleSignIn _google = GoogleSignIn(scopes: const [_scope]);
   final http.Client _client = http.Client();
   final AesGcm _aes = AesGcm.with256bits();
 
-  Reference _cloudBackupRef(String userId) {
-    final storage = FirebaseStorage.instanceFor(
-      bucket: 'gs://dainpay-a29fc.firebasestorage.app',
-    );
-    return storage.ref().child('users/$userId/backups/DainPay_Backup.dpb');
+  Future<Directory> _backupDirectory() async {
+    return getApplicationDocumentsDirectory();
   }
 
-  Future<void> _backupToFirebaseStorage({
-    required String userId,
-    required String encrypted,
+  Future<File> _localFile(String name) async {
+    final dir = await _backupDirectory();
+    return File('${dir.path}/$name');
+  }
+
+  Future<bool> saveLocal({
+    required Map<String, dynamic> payload,
+    required String recoveryCode,
   }) async {
-    if (userId.trim().isEmpty) throw StateError('معرّف المستخدم غير متاح');
-    await _cloudBackupRef(userId).putString(
-      encrypted,
-      format: PutStringFormat.raw,
-      metadata: SettableMetadata(contentType: _mime),
-    );
+    final encrypted = await encrypt(payload, recoveryCode);
+    final fileA = await _localFile(_localA);
+    final fileB = await _localFile(_localB);
+    final target = await fileA.exists() && !await fileB.exists()
+        ? fileB
+        : await fileB.exists() && !await fileA.exists()
+            ? fileA
+            : (DateTime.now().millisecondsSinceEpoch.isEven ? fileA : fileB);
+    final temp = File('${target.path}.tmp');
+    await temp.writeAsString(encrypted, flush: true);
+    if (await target.exists()) {
+      await target.delete();
+    }
+    await temp.rename(target.path);
+    return true;
   }
 
-  Future<void> _backupToFirestore({
-    required String userId,
-    required String encrypted,
-  }) async {
-    if (utf8.encode(encrypted).length > 900000) {
-      throw StateError('حجم النسخة كبير جداً للتخزين الاحتياطي البديل');
-    }
-    await FirebaseFirestore.instance.collection('users').doc(userId).set({
-      'secureBackup': encrypted,
-      'secureBackupAt': FieldValue.serverTimestamp(),
-      'secureBackupVersion': _schema,
-    }, SetOptions(merge: true));
-  }
+  Future<Map<String, dynamic>> restoreLocal(String recoveryCode) async {
+    final files = <File>[await _localFile(_localA), await _localFile(_localB)];
+    final candidates = <Map<String, dynamic>>[];
 
-  Future<String> _restoreFromFirestore(String userId) async {
-    final snap = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(userId)
-        .get();
-    final value = snap.data()?['secureBackup'];
-    if (value is! String || value.isEmpty) {
-      throw StateError('لم يتم العثور على نسخة سحابية');
+    for (final file in files) {
+      if (!await file.exists()) continue;
+      try {
+        final text = await file.readAsString();
+        final envelope = jsonDecode(text);
+        final createdAt = DateTime.tryParse('${envelope is Map ? envelope['createdAt'] : ''}');
+        final payload = await decrypt(text, recoveryCode);
+        candidates.add({
+          'payload': payload,
+          'createdAt': createdAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+        });
+      } catch (e) {
+        debugPrint('Local backup candidate invalid: $e');
+      }
     }
-    return value;
-  }
 
-  Future<String> _restoreFromFirebaseStorage(String userId) async {
-    if (userId.trim().isEmpty) throw StateError('معرّف المستخدم غير متاح');
-    final data = await _cloudBackupRef(userId).getData(5 * 1024 * 1024);
-    if (data == null || data.isEmpty) {
-      throw StateError('لم يتم العثور على نسخة سحابية');
+    if (candidates.isEmpty) {
+      throw StateError('لم يتم العثور على نسخة محلية سليمة');
     }
-    return utf8.decode(data);
+
+    candidates.sort((a, b) =>
+        (b['createdAt'] as DateTime).compareTo(a['createdAt'] as DateTime));
+    return Map<String, dynamic>.from(candidates.first['payload'] as Map);
   }
 
   Future<String?> _accessToken() async {
@@ -94,19 +110,28 @@ class DainPayBackupService {
       if (e.code == 'sign_in_failed' &&
           (e.message ?? '').contains('api: 10')) {
         throw StateError(
-          'إعداد Google Sign-In غير مكتمل (API 10). '
-          'أضف SHA-1 لشهادة إصدار التطبيق في Firebase، '
-          'فعّل Google Sign-In، ثم نزّل google-services.json الجديد.',
+          'إعداد Google Drive غير مكتمل (API 10). '
+          'يجب تسجيل SHA-1 لشهادة إصدار التطبيق في Firebase، '
+          'تفعيل Google Sign-In وDrive API، ثم تنزيل google-services.json الجديد.',
         );
       }
       rethrow;
     }
   }
 
+  String? get currentGoogleEmail => _google.currentUser?.email;
+
+  Future<void> changeGoogleAccount() async {
+    await _google.signOut();
+  }
+
   String generateRecoveryCode() {
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     final random = Random.secure();
-    return List.generate(20, (_) => alphabet[random.nextInt(alphabet.length)]).join();
+    return List.generate(
+      20,
+      (_) => alphabet[random.nextInt(alphabet.length)],
+    ).join();
   }
 
   Future<List<int>> _deriveKey(String recoveryCode, List<int> salt) async {
@@ -122,7 +147,10 @@ class DainPayBackupService {
     return key.extractBytes();
   }
 
-  Future<String> encrypt(Map<String, dynamic> payload, String recoveryCode) async {
+  Future<String> encrypt(
+    Map<String, dynamic> payload,
+    String recoveryCode,
+  ) async {
     final salt = _aes.newNonce();
     final keyBytes = await _deriveKey(recoveryCode, salt);
     final key = SecretKey(keyBytes);
@@ -141,10 +169,13 @@ class DainPayBackupService {
     return jsonEncode(envelope);
   }
 
-  Future<Map<String, dynamic>> decrypt(String text, String recoveryCode) async {
+  Future<Map<String, dynamic>> decrypt(
+    String text,
+    String recoveryCode,
+  ) async {
     final envelope = jsonDecode(text);
-    if (envelope is! Map) throw const FormatException('INVALID_BACKUP');
-    if (envelope['format'] != 'DainPay encrypted backup') {
+    if (envelope is! Map ||
+        envelope['format'] != 'DainPay encrypted backup') {
       throw const FormatException('INVALID_BACKUP');
     }
 
@@ -159,7 +190,9 @@ class DainPayBackupService {
     );
     final clear = await _aes.decrypt(box, secretKey: key);
     final payload = jsonDecode(utf8.decode(clear));
-    if (payload is! Map) throw const FormatException('INVALID_BACKUP_DATA');
+    if (payload is! Map) {
+      throw const FormatException('INVALID_BACKUP_DATA');
+    }
     return Map<String, dynamic>.from(payload);
   }
 
@@ -170,24 +203,37 @@ class DainPayBackupService {
       '&q=${Uri.encodeQueryComponent("name = '$_fileName' and trashed = false")}'
       '&pageSize=10&fields=files(id,name,modifiedTime)',
     );
-    final response = await _client.get(uri, headers: {'Authorization': 'Bearer $token'});
+    final response = await _client.get(
+      uri,
+      headers: {'Authorization': 'Bearer $token'},
+    );
     if (response.statusCode != 200) {
       throw Exception('Drive list failed: ${response.statusCode}');
     }
     final data = jsonDecode(response.body);
     final files = data['files'];
-    if (files is List && files.isNotEmpty) return '${files.first['id']}';
+    if (files is List && files.isNotEmpty) {
+      return '${files.first['id']}';
+    }
     return null;
   }
 
-  Future<String> _upload(String token, String content, {String? fileId}) async {
+  Future<String> _upload(
+    String token,
+    String content, {
+    String? fileId,
+  }) async {
     final bytes = utf8.encode(content);
     if (fileId == null) {
       final boundary = 'dainpay_${DateTime.now().microsecondsSinceEpoch}';
-      final metadata = jsonEncode({'name': _fileName, 'parents': ['appDataFolder']});
+      final metadata = jsonEncode({
+        'name': _fileName,
+        'parents': ['appDataFolder'],
+      });
       final body = <int>[];
       body.addAll(utf8.encode('--$boundary\r\n'));
-      body.addAll(utf8.encode('Content-Type: application/json; charset=UTF-8\r\n\r\n'));
+      body.addAll(utf8.encode(
+          'Content-Type: application/json; charset=UTF-8\r\n\r\n'));
       body.addAll(utf8.encode(metadata));
       body.addAll(utf8.encode('\r\n--$boundary\r\n'));
       body.addAll(utf8.encode('Content-Type: $_mime\r\n\r\n'));
@@ -195,7 +241,10 @@ class DainPayBackupService {
       body.addAll(utf8.encode('\r\n--$boundary--\r\n'));
 
       final response = await _client.post(
-        Uri.parse('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id'),
+        Uri.parse(
+          'https://www.googleapis.com/upload/drive/v3/files'
+          '?uploadType=multipart&fields=id',
+        ),
         headers: {
           'Authorization': 'Bearer $token',
           'Content-Type': 'multipart/related; boundary=$boundary',
@@ -203,13 +252,18 @@ class DainPayBackupService {
         body: Uint8List.fromList(body),
       );
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception('Drive upload failed: ${response.statusCode} ${response.body}');
+        throw Exception(
+          'Drive upload failed: ${response.statusCode} ${response.body}',
+        );
       }
       return '${jsonDecode(response.body)['id']}';
     }
 
     final response = await _client.patch(
-      Uri.parse('https://www.googleapis.com/upload/drive/v3/files/$fileId?uploadType=media&fields=id'),
+      Uri.parse(
+        'https://www.googleapis.com/upload/drive/v3/files/$fileId'
+        '?uploadType=media&fields=id',
+      ),
       headers: {
         'Authorization': 'Bearer $token',
         'Content-Type': _mime,
@@ -217,14 +271,18 @@ class DainPayBackupService {
       body: Uint8List.fromList(bytes),
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Drive update failed: ${response.statusCode} ${response.body}');
+      throw Exception(
+        'Drive update failed: ${response.statusCode} ${response.body}',
+      );
     }
     return fileId;
   }
 
   Future<String> _download(String token, String fileId) async {
     final response = await _client.get(
-      Uri.parse('https://www.googleapis.com/drive/v3/files/$fileId?alt=media'),
+      Uri.parse(
+        'https://www.googleapis.com/drive/v3/files/$fileId?alt=media',
+      ),
       headers: {'Authorization': 'Bearer $token'},
     );
     if (response.statusCode != 200) {
@@ -236,74 +294,86 @@ class DainPayBackupService {
   Future<DainPayBackupResult> backup({
     required Map<String, dynamic> payload,
     required String recoveryCode,
-    required String userId,
   }) async {
     final encrypted = await encrypt(payload, recoveryCode);
-
-    // Google Drive is optional. A broken OAuth configuration must never
-    // prevent a user from making a secure cloud backup.
-    try {
-      final token = await _accessToken();
-      if (token != null) {
-        final existing = await _findFile(token);
-        await _upload(token, encrypted, fileId: existing);
-        return DainPayBackupResult(
-          success: true,
-          message: 'تم حفظ النسخة المشفرة في Google Drive',
-          recoveryCode: recoveryCode,
-        );
-      }
-    } catch (e) {
-      debugPrint('Google Drive unavailable; using Firebase Storage: $e');
-    }
+    var localSaved = false;
+    var cloudSaved = false;
+    String? email;
+    Object? cloudError;
 
     try {
-      try {
-        await _backupToFirebaseStorage(userId: userId, encrypted: encrypted);
-      } catch (storageError) {
-        debugPrint('Firebase Storage unavailable; using Firestore fallback: $storageError');
-        await _backupToFirestore(userId: userId, encrypted: encrypted);
-      }
-      return DainPayBackupResult(
-        success: true,
-        message: 'تم حفظ النسخة المشفرة سحابياً بأمان عبر Firebase.',
+      localSaved = await saveLocal(
+        payload: payload,
         recoveryCode: recoveryCode,
       );
     } catch (e) {
+      debugPrint('Local backup failed: $e');
+    }
+
+    try {
+      final token = await _accessToken();
+      email = _google.currentUser?.email;
+      if (token != null) {
+        final existing = await _findFile(token);
+        await _upload(token, encrypted, fileId: existing);
+        cloudSaved = true;
+      }
+    } catch (e) {
+      cloudError = e;
+      debugPrint('Google Drive backup unavailable: $e');
+    }
+
+    if (cloudSaved) {
       return DainPayBackupResult(
-        success: false,
-        message: 'فشل النسخ الاحتياطي السحابي: $e',
+        success: true,
+        message: email == null
+            ? 'تم حفظ النسخة محلياً وفي Google Drive.'
+            : 'تم حفظ النسخة المشفرة محلياً وفي Google Drive لحساب: $email',
+        recoveryCode: recoveryCode,
+        accountEmail: email,
+        localSaved: localSaved,
+        cloudSaved: true,
       );
     }
+
+    if (localSaved) {
+      return DainPayBackupResult(
+        success: true,
+        message: cloudError == null
+            ? 'تم حفظ النسخة المشفرة محلياً.'
+            : 'تم حفظ نسخة محلية مشفرة. تعذر الوصول إلى Google Drive حالياً.',
+        recoveryCode: recoveryCode,
+        accountEmail: email,
+        localSaved: true,
+        cloudSaved: false,
+      );
+    }
+
+    return DainPayBackupResult(
+      success: false,
+      message: 'فشل النسخ الاحتياطي المحلي والسحابي: $cloudError',
+      recoveryCode: recoveryCode,
+      accountEmail: email,
+    );
   }
 
   Future<Map<String, dynamic>> restore({
     required String recoveryCode,
-    required String userId,
   }) async {
-    String? encrypted;
-
     try {
       final token = await _accessToken();
       if (token != null) {
         final fileId = await _findFile(token);
         if (fileId != null) {
-          encrypted = await _download(token, fileId);
+          final encrypted = await _download(token, fileId);
+          return decrypt(encrypted, recoveryCode);
         }
       }
     } catch (e) {
-      debugPrint('Google Drive restore unavailable; using Firebase Storage: $e');
+      debugPrint('Google Drive restore unavailable; trying local backup: $e');
     }
 
-    if (encrypted == null) {
-      try {
-        encrypted = await _restoreFromFirebaseStorage(userId);
-      } catch (storageError) {
-        debugPrint('Firebase Storage restore unavailable; using Firestore fallback: $storageError');
-        encrypted = await _restoreFromFirestore(userId);
-      }
-    }
-    return decrypt(encrypted, recoveryCode);
+    return restoreLocal(recoveryCode);
   }
 
   void dispose() => _client.close();

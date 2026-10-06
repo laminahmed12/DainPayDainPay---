@@ -68,26 +68,6 @@ jobs:
           PY
       - name: Install dependencies
         run: flutter pub get
-      - name: Apply encrypted Google Drive backup integration
-        run: |
-          python3 tool/add_drive_backup.py
-          dart format lib/main.dart lib/backup_service.dart
-      - name: Apply v76 activation and customer deletion baseline fixes
-        run: |
-          python3 tool/fix_v76h_activation_delete.py
-          dart format lib/main.dart
-      - name: Apply v77 authoritative customer deletion fix
-        run: |
-          python3 tool/fix_v77_customer_delete.py
-          dart format lib/main.dart
-      - name: Apply v78 precise cloud deletion diagnostics
-        run: |
-          python3 tool/fix_v78_customer_delete.py
-          dart format lib/main.dart
-      - name: Apply v79 Google-only customer storage
-        run: |
-          python3 tool/google_only_storage.py
-          dart format lib/main.dart
       - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json
@@ -127,7 +107,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v80-final-release
+          name: dainpay-v81-data-protection-release
           path: |
             build/app/outputs/flutter-apk/app-release.apk
             release-signing-certificate.txt

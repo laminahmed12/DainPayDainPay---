@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'package:cryptography/cryptography.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/services.dart';
@@ -43,6 +45,32 @@ class DainPayBackupService {
       format: PutStringFormat.raw,
       metadata: SettableMetadata(contentType: _mime),
     );
+  }
+
+  Future<void> _backupToFirestore({
+    required String userId,
+    required String encrypted,
+  }) async {
+    if (utf8.encode(encrypted).length > 900000) {
+      throw StateError('حجم النسخة كبير جداً للتخزين الاحتياطي البديل');
+    }
+    await FirebaseFirestore.instance.collection('users').doc(userId).set({
+      'secureBackup': encrypted,
+      'secureBackupAt': FieldValue.serverTimestamp(),
+      'secureBackupVersion': _schema,
+    }, SetOptions(merge: true));
+  }
+
+  Future<String> _restoreFromFirestore(String userId) async {
+    final snap = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .get();
+    final value = snap.data()?['secureBackup'];
+    if (value is! String || value.isEmpty) {
+      throw StateError('لم يتم العثور على نسخة سحابية');
+    }
+    return value;
   }
 
   Future<String> _restoreFromFirebaseStorage(String userId) async {
@@ -229,7 +257,12 @@ class DainPayBackupService {
     }
 
     try {
-      await _backupToFirebaseStorage(userId: userId, encrypted: encrypted);
+      try {
+        await _backupToFirebaseStorage(userId: userId, encrypted: encrypted);
+      } catch (storageError) {
+        debugPrint('Firebase Storage unavailable; using Firestore fallback: $storageError');
+        await _backupToFirestore(userId: userId, encrypted: encrypted);
+      }
       return DainPayBackupResult(
         success: true,
         message: 'تم حفظ النسخة المشفرة سحابياً بأمان عبر Firebase.',
@@ -261,7 +294,14 @@ class DainPayBackupService {
       debugPrint('Google Drive restore unavailable; using Firebase Storage: $e');
     }
 
-    encrypted ??= await _restoreFromFirebaseStorage(userId);
+    if (encrypted == null) {
+      try {
+        encrypted = await _restoreFromFirebaseStorage(userId);
+      } catch (storageError) {
+        debugPrint('Firebase Storage restore unavailable; using Firestore fallback: $storageError');
+        encrypted = await _restoreFromFirestore(userId);
+      }
+    }
     return decrypt(encrypted, recoveryCode);
   }
 

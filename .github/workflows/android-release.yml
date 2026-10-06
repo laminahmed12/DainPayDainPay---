@@ -91,6 +91,14 @@ jobs:
         run: |
           test -f android/app/google-services.json
           grep -q 'com.adreemk.dainpay' android/app/google-services.json
+
+      - name: Deploy Firestore rules when Firebase CI credentials are configured
+        if: ${{ secrets.FIREBASE_TOKEN != '' }}
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          npx --yes firebase-tools deploy --only firestore:rules --project dainpay-a29fc --token "$FIREBASE_TOKEN"
+
       - name: Add required Android permissions
         run: |
           python3 - <<'PY'
@@ -108,8 +116,14 @@ jobs:
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
       - name: Build release APK
         run: flutter build apk --release
+      - name: Record release signing certificate
+        run: |
+          find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1 | xargs -I{} {} verify --print-certs build/app/outputs/flutter-apk/app-release.apk > release-signing-certificate.txt || true
+          cat release-signing-certificate.txt
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: dainpay-v80-final-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            release-signing-certificate.txt

@@ -1,0 +1,114 @@
+name: DainPay v78 Delete Cloud Fix
+
+on:
+  push:
+    branches:
+      - repair-v78-delete-cloud-fix
+    paths-ignore:
+      - lib/main.dart
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.4'
+          channel: stable
+          cache: true
+
+      - name: Patch deletion logic
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('lib/main.dart')
+          s = p.read_text(encoding='utf-8')
+          pattern = re.compile(r"  Future<bool> deleteCustomer\(Customer customer\) async \{.*?\n  \}\n\n  Future<void> deleteVoiceDraft", re.S)
+          replacement = '''  Future<bool> deleteCustomer(Customer customer) async {
+    if (balance(customer.id) != 0) return false;
+    if (!firebaseReady || uid.isEmpty) return false;
+
+    try {
+      // First push the current local ledger, then force the verification read
+      // against the Firestore server. Cached data must never authorize deletion.
+      await syncAll();
+      final txSnap = await transactionRef
+          .where('customerId', isEqualTo: customer.id)
+          .get(const GetOptions(source: Source.server));
+
+      var cloudBalance = 0;
+      for (final doc in txSnap.docs) {
+        final data = doc.data();
+        final type = '${data['type'] ?? ''}';
+        final raw = data['amountCents'];
+        final amount = raw is num
+            ? raw.toInt()
+            : data['amount'] is num
+                ? ((data['amount'] as num).toDouble() * 100).round()
+                : 0;
+        cloudBalance += type == 'debt' ? amount : -amount;
+      }
+
+      if (cloudBalance != 0) return false;
+
+      final batch = FirebaseFirestore.instance.batch();
+      for (final doc in txSnap.docs) {
+        batch.delete(doc.reference);
+      }
+      batch.delete(customerRef.doc(customer.id));
+      await batch.commit();
+
+      transactions.removeWhere((tx) => tx.customerId == customer.id);
+      customers.removeWhere((item) => item.id == customer.id);
+      await saveLocal();
+      safeNotify();
+      return true;
+    } catch (e) {
+      debugPrint('Delete customer verification/delete error: $e');
+      return false;
+    }
+  }
+
+  Future<void> deleteVoiceDraft'''
+          s2, n = pattern.subn(replacement, s, count=1)
+          if n != 1:
+              raise SystemExit('deleteCustomer anchor not found')
+          p.write_text(s2, encoding='utf-8')
+          print('v78 patch applied')
+          PY
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Flutter analyze
+        run: flutter analyze
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Commit patched source
+        run: |
+          git config user.name 'DainPay Build Bot'
+          git config user.email 'dainpay-build@users.noreply.github.com'
+          git add lib/main.dart
+          git commit -m 'v78: force server verification before zero-balance customer deletion [skip ci]' || true
+          git push origin HEAD:repair-v78-delete-cloud-fix
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dainpay-v78-delete-cloud-fix-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 90

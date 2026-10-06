@@ -2,10 +2,13 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75 ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed, repair-v74-controlled-4 ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -68,10 +71,34 @@ jobs:
         run: |
           python3 tool/add_drive_backup.py
           dart format lib/main.dart lib/backup_service.dart
+      - name: Apply v76 activation and customer deletion baseline fixes
+        run: |
+          python3 tool/fix_v76h_activation_delete.py
+          dart format lib/main.dart
+      - name: Apply v77 authoritative customer deletion fix
+        run: |
+          python3 tool/fix_v77_customer_delete.py
+          dart format lib/main.dart
+      - name: Apply v78 precise cloud deletion diagnostics
+        run: |
+          python3 tool/fix_v78_customer_delete.py
+          dart format lib/main.dart
+      - name: Apply v79 Google-only customer storage
+        run: |
+          python3 tool/google_only_storage.py
+          dart format lib/main.dart
       - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json
           grep -q 'com.adreemk.dainpay' android/app/google-services.json
+
+      - name: Deploy Firestore rules when Firebase CI credentials are configured
+        if: ${{ secrets.FIREBASE_TOKEN != '' }}
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          npx --yes firebase-tools deploy --only firestore:rules --project dainpay-a29fc --token "$FIREBASE_TOKEN"
+
       - name: Add required Android permissions
         run: |
           python3 - <<'PY'
@@ -89,8 +116,14 @@ jobs:
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
       - name: Build release APK
         run: flutter build apk --release
+      - name: Record release signing certificate
+        run: |
+          find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1 | xargs -I{} {} verify --print-certs build/app/outputs/flutter-apk/app-release.apk > release-signing-certificate.txt || true
+          cat release-signing-certificate.txt
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v75-backup-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: dainpay-v80-final-release
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            release-signing-certificate.txt

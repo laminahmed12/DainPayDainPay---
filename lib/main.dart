@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'backup_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -75,9 +76,7 @@ String _digits(String value) {
   var output = value;
 
   for (var i = 0; i < 10; i++) {
-    output = output
-        .replaceAll(arabic[i], '$i')
-        .replaceAll(persian[i], '$i');
+    output = output.replaceAll(arabic[i], '$i').replaceAll(persian[i], '$i');
   }
 
   return output;
@@ -98,13 +97,11 @@ int parseCents(String value) {
   if (comma >= 0 && dot >= 0) {
     final separator = max(comma, dot);
 
-    final integerPart = v
-        .substring(0, separator)
-        .replaceAll(RegExp(r'[,.]'), '');
+    final integerPart =
+        v.substring(0, separator).replaceAll(RegExp(r'[,.]'), '');
 
-    final fraction = v
-        .substring(separator + 1)
-        .replaceAll(RegExp(r'[^0-9]'), '');
+    final fraction =
+        v.substring(separator + 1).replaceAll(RegExp(r'[^0-9]'), '');
 
     return _partsToCents(integerPart, fraction);
   }
@@ -112,13 +109,11 @@ int parseCents(String value) {
   if (comma >= 0 || dot >= 0) {
     final separator = comma >= 0 ? comma : dot;
 
-    final integerPart = v
-        .substring(0, separator)
-        .replaceAll(RegExp(r'[^0-9-]'), '');
+    final integerPart =
+        v.substring(0, separator).replaceAll(RegExp(r'[^0-9-]'), '');
 
-    final fraction = v
-        .substring(separator + 1)
-        .replaceAll(RegExp(r'[^0-9]'), '');
+    final fraction =
+        v.substring(separator + 1).replaceAll(RegExp(r'[^0-9]'), '');
 
     if (fraction.length <= 2) {
       return _partsToCents(integerPart, fraction);
@@ -130,8 +125,7 @@ int parseCents(String value) {
     return max(0, amount * 100);
   }
 
-  final amount =
-      int.tryParse(v.replaceAll(RegExp(r'[^0-9-]'), '')) ?? 0;
+  final amount = int.tryParse(v.replaceAll(RegExp(r'[^0-9-]'), '')) ?? 0;
 
   return max(0, amount * 100);
 }
@@ -337,8 +331,7 @@ class Tx {
     if (rawDate is Timestamp) {
       parsedDate = rawDate.toDate();
     } else {
-      parsedDate =
-          DateTime.tryParse('${rawDate ?? ''}') ?? DateTime.now();
+      parsedDate = DateTime.tryParse('${rawDate ?? ''}') ?? DateTime.now();
     }
 
     return Tx(
@@ -428,6 +421,10 @@ class Store extends ChangeNotifier {
   bool dark = false;
   bool isAdmin = false;
 
+  final DainPayBackupService backupService = DainPayBackupService();
+  String backupRecoveryCode = '';
+  DateTime? lastBackupAt;
+
   bool _disposed = false;
   bool _syncQueued = false;
   Future<void>? _syncFuture;
@@ -442,32 +439,43 @@ class Store extends ChangeNotifier {
     store.dark = store.prefs.getBool('dark') ?? false;
     store.activated = store.prefs.getBool('activated') ?? false;
     store.deviceId = store.prefs.getString('device_id') ?? '';
+    store.backupRecoveryCode =
+        store.prefs.getString('backup_recovery_code') ?? '';
+    final lastBackup = store.prefs.getString('last_backup_at');
+    store.lastBackupAt =
+        lastBackup == null ? null : DateTime.tryParse(lastBackup);
 
     if (store.deviceId.isEmpty) {
       store.deviceId =
           'DP-${DateTime.now().millisecondsSinceEpoch}-${Random.secure().nextInt(1000000)}';
-      await store._pref(() => store.prefs.setString('device_id', store.deviceId));
+      await store
+          ._pref(() => store.prefs.setString('device_id', store.deviceId));
     }
 
     final savedTrial = store.prefs.getString('trial_start');
     if (savedTrial == null) {
       store.trialStart = DateTime.now();
       await store._pref(
-        () => store.prefs.setString('trial_start', store.trialStart!.toIso8601String()),
+        () => store.prefs
+            .setString('trial_start', store.trialStart!.toIso8601String()),
       );
     } else {
       store.trialStart = DateTime.tryParse(savedTrial);
       if (store.trialStart == null) {
         store.trialStart = DateTime.now();
         await store._pref(
-          () => store.prefs.setString('trial_start', store.trialStart!.toIso8601String()),
+          () => store.prefs
+              .setString('trial_start', store.trialStart!.toIso8601String()),
         );
       }
     }
 
-    store._loadList('customers', (json) => store.customers.add(Customer.fromJson(json)));
-    store._loadList('transactions', (json) => store.transactions.add(Tx.fromJson(json)));
-    store._loadList('voice_drafts', (json) => store.voiceDrafts.add(VoiceDraft.fromJson(json)));
+    store._loadList(
+        'customers', (json) => store.customers.add(Customer.fromJson(json)));
+    store._loadList(
+        'transactions', (json) => store.transactions.add(Tx.fromJson(json)));
+    store._loadList('voice_drafts',
+        (json) => store.voiceDrafts.add(VoiceDraft.fromJson(json)));
 
     return store;
   }
@@ -498,6 +506,7 @@ class Store extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    backupService.dispose();
     super.dispose();
   }
 
@@ -565,7 +574,6 @@ class Store extends ChangeNotifier {
             ));
         await userRef.doc(uid).set({
           'trialStart': Timestamp.fromDate(trialStart!),
-          'deviceId': deviceId,
           'activated': activated,
         }, SetOptions(merge: true));
       }
@@ -598,7 +606,6 @@ class Store extends ChangeNotifier {
       } else if (trialStart != null) {
         await ref.set({
           'trialStart': Timestamp.fromDate(trialStart!),
-          'deviceId': deviceId,
           'activated': activated,
         }, SetOptions(merge: true));
       }
@@ -659,9 +666,12 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> saveLocal() async {
-    await _pref(() => prefs.setString('customers', jsonEncode(customers.map((e) => e.toJson()).toList())));
-    await _pref(() => prefs.setString('transactions', jsonEncode(transactions.map((e) => e.toJson()).toList())));
-    await _pref(() => prefs.setString('voice_drafts', jsonEncode(voiceDrafts.map((e) => e.toJson()).toList())));
+    await _pref(() => prefs.setString(
+        'customers', jsonEncode(customers.map((e) => e.toJson()).toList())));
+    await _pref(() => prefs.setString('transactions',
+        jsonEncode(transactions.map((e) => e.toJson()).toList())));
+    await _pref(() => prefs.setString('voice_drafts',
+        jsonEncode(voiceDrafts.map((e) => e.toJson()).toList())));
     await _pref(() => prefs.setString('shop', shop));
     await _pref(() => prefs.setString('whatsappMessage', whatsappMessage));
     await _pref(() => prefs.setBool('dark', dark));
@@ -681,7 +691,9 @@ class Store extends ChangeNotifier {
     final duplicate = customers.any((existing) {
       final sameName = existing.name.trim().toLowerCase() == normalizedName;
       final existingPhone = phone218(existing.phone);
-      final samePhone = normalizedPhone.isNotEmpty && existingPhone.isNotEmpty && normalizedPhone == existingPhone;
+      final samePhone = normalizedPhone.isNotEmpty &&
+          existingPhone.isNotEmpty &&
+          normalizedPhone == existingPhone;
       return sameName && samePhone;
     });
 
@@ -695,17 +707,168 @@ class Store extends ChangeNotifier {
 
   Future<bool> saveTx(Tx transaction) async {
     if (transaction.amountCents <= 0) return false;
-    if (transaction.type != 'debt' && transaction.type != 'payment') return false;
+    if (transaction.type != 'debt' && transaction.type != 'payment')
+      return false;
 
     transactions.add(transaction);
     await save();
     return true;
   }
 
+  Future<bool> deleteCustomer(Customer customer) async {
+    if (balance(customer.id) != 0) return false;
+    if (!firebaseReady || uid.isEmpty) return false;
+
+    try {
+      final txSnap = await transactionRef
+          .where('customerId', isEqualTo: customer.id)
+          .get();
+      var cloudBalance = 0;
+      for (final doc in txSnap.docs) {
+        final data = doc.data();
+        final type = '${data['type'] ?? ''}';
+        final raw = data['amountCents'];
+        final amount = raw is num
+            ? raw.toInt()
+            : data['amount'] is num
+                ? ((data['amount'] as num).toDouble() * 100).round()
+                : 0;
+        cloudBalance += type == 'debt' ? amount : -amount;
+      }
+      if (cloudBalance != 0) return false;
+
+      final batch = FirebaseFirestore.instance.batch();
+      for (final doc in txSnap.docs) {
+        batch.delete(doc.reference);
+      }
+      batch.delete(customerRef.doc(customer.id));
+      await batch.commit();
+
+      transactions.removeWhere((tx) => tx.customerId == customer.id);
+      customers.removeWhere((item) => item.id == customer.id);
+      await saveLocal();
+      safeNotify();
+      return true;
+    } catch (e) {
+      debugPrint('Delete customer error: $e');
+      return false;
+    }
+  }
+
   Future<void> deleteVoiceDraft(String id) async {
     voiceDrafts.removeWhere((draft) => draft.id == id);
     await saveLocal();
     safeNotify();
+  }
+
+  Future<String> ensureBackupRecoveryCode() async {
+    if (backupRecoveryCode.trim().isEmpty) {
+      backupRecoveryCode = backupService.generateRecoveryCode();
+      await _pref(
+          () => prefs.setString('backup_recovery_code', backupRecoveryCode));
+    }
+    return backupRecoveryCode;
+  }
+
+  Map<String, dynamic> backupPayload() {
+    return {
+      'schema': 1,
+      'app': 'DainPay',
+      'shop': shop,
+      'whatsappMessage': whatsappMessage,
+      'dark': dark,
+      'activated': activated,
+      'trialStart': trialStart?.toIso8601String(),
+      'customers': customers.map((e) => e.toJson()).toList(),
+      'transactions': transactions.map((e) => e.toJson()).toList(),
+      'voiceDrafts': voiceDrafts.map((e) => e.toJson()).toList(),
+      'createdAt': DateTime.now().toUtc().toIso8601String(),
+    };
+  }
+
+  Future<DainPayBackupResult> backupToGoogleDrive() async {
+    final recovery = await ensureBackupRecoveryCode();
+    final result = await backupService.backup(
+      payload: backupPayload(),
+      recoveryCode: recovery,
+      userId: uid,
+    );
+    if (result.success) {
+      lastBackupAt = DateTime.now();
+      await _pref(() =>
+          prefs.setString('last_backup_at', lastBackupAt!.toIso8601String()));
+      safeNotify();
+    }
+    return result;
+  }
+
+  Future<DainPayBackupResult> restoreFromGoogleDrive(
+      String recoveryCode) async {
+    try {
+      final payload = await backupService.restore(
+        recoveryCode: recoveryCode,
+        userId: uid,
+      );
+      if (payload['schema'] != 1 || payload['app'] != 'DainPay') {
+        return const DainPayBackupResult(
+            success: false, message: 'ملف النسخة الاحتياطية غير صالح');
+      }
+      final rawCustomers = payload['customers'];
+      final rawTransactions = payload['transactions'];
+      final rawDrafts = payload['voiceDrafts'];
+      if (rawCustomers is! List ||
+          rawTransactions is! List ||
+          rawDrafts is! List) {
+        return const DainPayBackupResult(
+            success: false, message: 'النسخة الاحتياطية ناقصة أو تالفة');
+      }
+
+      final restoredCustomers = <Customer>[];
+      for (final item in rawCustomers) {
+        if (item is Map)
+          restoredCustomers
+              .add(Customer.fromJson(Map<String, dynamic>.from(item)));
+      }
+      final restoredTransactions = <Tx>[];
+      for (final item in rawTransactions) {
+        if (item is Map)
+          restoredTransactions
+              .add(Tx.fromJson(Map<String, dynamic>.from(item)));
+      }
+      final restoredDrafts = <VoiceDraft>[];
+      for (final item in rawDrafts) {
+        if (item is Map)
+          restoredDrafts
+              .add(VoiceDraft.fromJson(Map<String, dynamic>.from(item)));
+      }
+
+      customers
+        ..clear()
+        ..addAll(restoredCustomers);
+      transactions
+        ..clear()
+        ..addAll(restoredTransactions);
+      voiceDrafts
+        ..clear()
+        ..addAll(restoredDrafts);
+      shop = '${payload['shop'] ?? shop}'.trim().isEmpty
+          ? shop
+          : '${payload['shop']}'.trim();
+      whatsappMessage = '${payload['whatsappMessage'] ?? whatsappMessage}';
+      dark = payload['dark'] == true;
+      activated = payload['activated'] == true;
+      trialStart =
+          DateTime.tryParse('${payload['trialStart'] ?? ''}') ?? trialStart;
+
+      await saveLocal();
+      safeNotify();
+      return const DainPayBackupResult(
+          success: true, message: 'تمت استعادة بيانات DainPay بنجاح');
+    } catch (_) {
+      return const DainPayBackupResult(
+          success: false,
+          message: 'تعذر فك النسخة الاحتياطية. تحقق من رمز الاسترداد.');
+    }
   }
 
   Future<void> syncAll() async {
@@ -747,7 +910,8 @@ class Store extends ChangeNotifier {
 
       for (final customer in customerList) {
         operations.add((batch) {
-          batch.set(customerRef.doc(customer.id), customer.toJson(), SetOptions(merge: true));
+          batch.set(customerRef.doc(customer.id), customer.toJson(),
+              SetOptions(merge: true));
         });
       }
 
@@ -782,9 +946,8 @@ class Store extends ChangeNotifier {
   }
 
   int balance(String customerId) {
-    return transactions
-        .where((t) => t.customerId == customerId)
-        .fold<int>(0, (sum, t) => sum + (t.type == 'debt' ? t.amountCents : -t.amountCents));
+    return transactions.where((t) => t.customerId == customerId).fold<int>(0,
+        (sum, t) => sum + (t.type == 'debt' ? t.amountCents : -t.amountCents));
   }
 
   int debts(String customerId) {
@@ -825,20 +988,17 @@ class Store extends ChangeNotifier {
     final ref = activationCodesRef.doc(clean);
 
     try {
-      final success = await FirebaseFirestore.instance.runTransaction<bool>((transaction) async {
+      final success = await FirebaseFirestore.instance
+          .runTransaction<bool>((transaction) async {
         final snap = await transaction.get(ref);
         if (!snap.exists) return false;
 
         final data = snap.data();
         if (data == null || data['used'] == true) return false;
 
-        final boundDevice = '${data['deviceId'] ?? ''}'.trim();
-        if (boundDevice.isNotEmpty && boundDevice != deviceId) return false;
-
         transaction.update(ref, {
           'used': true,
           'usedAt': FieldValue.serverTimestamp(),
-          'usedDeviceId': deviceId,
           'usedUid': uid,
         });
 
@@ -850,7 +1010,6 @@ class Store extends ChangeNotifier {
       await userRef.doc(uid).set({
         'activated': true,
         'activatedAt': FieldValue.serverTimestamp(),
-        'deviceId': deviceId,
       }, SetOptions(merge: true));
 
       activated = true;
@@ -863,38 +1022,30 @@ class Store extends ChangeNotifier {
     }
   }
 
-  Future<String?> generateCode(String targetDevice) async {
-    if (!firebaseReady || !isAdmin || targetDevice.trim().isEmpty) return null;
+  Future<String?> generateCode() async {
+    if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
 
-    final device = targetDevice.trim();
-
-    // Do not call get() on a missing activation-code document: the Firestore
-    // rules intentionally permit reads only for existing unused codes.
-    // Instead, attempt the create directly and retry on the extremely unlikely
-    // six-digit collision.
-    for (var attempt = 0; attempt < 50; attempt++) {
+    // CREATE avoids treating a random-code collision as an UPDATE.
+    for (var attempt = 0; attempt < 100; attempt++) {
       final code = (100000 + Random.secure().nextInt(900000)).toString();
       final ref = activationCodesRef.doc(code);
-
       try {
-        await ref.set({
-          'deviceId': device,
+        await ref.create({
           'used': false,
           'createdAt': FieldValue.serverTimestamp(),
           'createdByUid': uid,
+          'deviceId': deviceId,
         });
         return code;
       } on FirebaseException catch (e) {
-        // A six-digit collision is harmless; generate another candidate.
-        if (e.code == 'permission-denied') continue;
+        if (e.code == 'already-exists') continue;
         debugPrint('Generate activation code error: ${e.code}: ${e.message}');
-        return null;
+        rethrow;
       } catch (e) {
         debugPrint('Generate activation code error: $e');
-        return null;
+        rethrow;
       }
     }
-
     return null;
   }
 
@@ -930,8 +1081,9 @@ class DainPayApp extends StatelessWidget {
       brightness: brightness,
       colorScheme: scheme,
       fontFamily: 'Cairo',
-      scaffoldBackgroundColor:
-          brightness == Brightness.light ? const Color(0xFFF6F9FA) : const Color(0xFF101719),
+      scaffoldBackgroundColor: brightness == Brightness.light
+          ? const Color(0xFFF6F9FA)
+          : const Color(0xFF101719),
       appBarTheme: const AppBarTheme(centerTitle: true),
       cardTheme: CardTheme(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -983,12 +1135,14 @@ class Logo extends StatelessWidget {
         gradient: const LinearGradient(colors: [emerald, mint]),
         borderRadius: BorderRadius.circular(14),
         boxShadow: const [
-          BoxShadow(blurRadius: 8, offset: Offset(0, 3), color: Color(0x22000000)),
+          BoxShadow(
+              blurRadius: 8, offset: Offset(0, 3), color: Color(0x22000000)),
         ],
       ),
       child: const Text(
         'DP',
-        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16),
+        style: TextStyle(
+            color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16),
       ),
     );
   }
@@ -1013,14 +1167,20 @@ class _HomePageState extends State<HomePage> {
 
   void hiddenAdmin() {
     final now = DateTime.now();
-    if (lastTap == null || now.difference(lastTap!).inMilliseconds > 2000) {
+
+    // Exactly three consecutive rapid taps. A pause of more than 700 ms
+    // breaks the sequence, so three taps spread over seconds cannot unlock it.
+    if (lastTap == null ||
+        now.difference(lastTap!).inMilliseconds > 700) {
       taps = 0;
     }
+
     lastTap = now;
     taps++;
 
-    if (taps >= 3) {
+    if (taps == 3) {
       taps = 0;
+      lastTap = null;
       showDialog(
         context: context,
         builder: (_) => AdminGate(store: widget.store),
@@ -1064,7 +1224,8 @@ class _HomePageState extends State<HomePage> {
         leading: const Padding(padding: EdgeInsets.all(8), child: Logo()),
         title: GestureDetector(
           onTap: hiddenAdmin,
-          child: Text(store.shop, style: const TextStyle(fontWeight: FontWeight.w900)),
+          child: Text(store.shop,
+              style: const TextStyle(fontWeight: FontWeight.w900)),
         ),
         actions: [
           IconButton(
@@ -1073,7 +1234,8 @@ class _HomePageState extends State<HomePage> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => VoiceDraftsPage(store: store)),
+                MaterialPageRoute(
+                    builder: (_) => VoiceDraftsPage(store: store)),
               );
             },
           ),
@@ -1111,7 +1273,8 @@ class _HomePageState extends State<HomePage> {
                 child: ListTile(
                   leading: const Icon(Icons.cloud_off, color: burgundy),
                   title: const Text('Firebase غير متصل'),
-                  subtitle: const Text('البيانات المحلية ما زالت تعمل، وستتم المزامنة عند توفر الخدمة.'),
+                  subtitle: const Text(
+                      'البيانات المحلية ما زالت تعمل، وستتم المزامنة عند توفر الخدمة.'),
                   trailing: IconButton(
                     onPressed: store.connectFirebase,
                     icon: const Icon(Icons.refresh),
@@ -1153,10 +1316,16 @@ class _HomePageState extends State<HomePage> {
                 child: Row(
                   children: [
                     Expanded(
-                      child: _Stat(title: 'إجمالي المتبقي', value: money(total), color: burgundy),
+                      child: _Stat(
+                          title: 'إجمالي المتبقي',
+                          value: money(total),
+                          color: burgundy),
                     ),
                     Expanded(
-                      child: _Stat(title: 'العملاء عليهم دَين', value: '${filtered.length}', color: emerald),
+                      child: _Stat(
+                          title: 'العملاء عليهم دَين',
+                          value: '${filtered.length}',
+                          color: emerald),
                     ),
                   ],
                 ),
@@ -1167,13 +1336,15 @@ class _HomePageState extends State<HomePage> {
                 color: burgundy.withOpacity(.10),
                 child: ListTile(
                   leading: const Icon(Icons.lock_outline, color: burgundy),
-                  title: const Text('انتهت التجربة', style: TextStyle(fontWeight: FontWeight.bold)),
+                  title: const Text('انتهت التجربة',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
                   subtitle: const Text('فعّل التطبيق لمواصلة تسجيل العمليات.'),
                   trailing: TextButton(
                     onPressed: () {
                       Navigator.push(
                         context,
-                        MaterialPageRoute(builder: (_) => ActivationPage(store: store)),
+                        MaterialPageRoute(
+                            builder: (_) => ActivationPage(store: store)),
                       );
                     },
                     child: const Text('تفعيل'),
@@ -1224,16 +1395,20 @@ class _HomePageState extends State<HomePage> {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => CustomerPage(store: store, customer: customer),
+                        builder: (_) =>
+                            CustomerPage(store: store, customer: customer),
                       ),
                     );
                   },
                   leading: CircleAvatar(
                     child: Text(
-                      customer.name.trim().isEmpty ? '؟' : customer.name.trim().characters.first,
+                      customer.name.trim().isEmpty
+                          ? '؟'
+                          : customer.name.trim().characters.first,
                     ),
                   ),
-                  title: Text(customer.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  title: Text(customer.name,
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
                   subtitle: Text(
                     '${customer.phone}\n'
                     '${store.risk(customer.id)} • '
@@ -1259,13 +1434,15 @@ class _HomePageState extends State<HomePage> {
             ? () {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (_) => ActivationPage(store: store)),
+                  MaterialPageRoute(
+                      builder: (_) => ActivationPage(store: store)),
                 );
               }
             : () {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (_) => AddCustomerPage(store: store)),
+                  MaterialPageRoute(
+                      builder: (_) => AddCustomerPage(store: store)),
                 );
               },
         icon: Icon(store.locked ? Icons.lock : Icons.person_add_alt_1),
@@ -1289,7 +1466,8 @@ class _Stat extends StatelessWidget {
         Text(title),
         Text(
           value,
-          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: color),
+          style: TextStyle(
+              fontSize: 20, fontWeight: FontWeight.w900, color: color),
         ),
       ],
     );
@@ -1312,7 +1490,10 @@ class PageForm extends StatelessWidget {
       appBar: AppBar(title: Text(title)),
       body: ListView(
         padding: const EdgeInsets.all(16),
-        children: children.map((widget) => Padding(padding: const EdgeInsets.only(bottom: 12), child: widget)).toList(),
+        children: children
+            .map((widget) => Padding(
+                padding: const EdgeInsets.only(bottom: 12), child: widget))
+            .toList(),
       ),
     );
   }
@@ -1393,7 +1574,8 @@ class _AddCustomerPageState extends State<AddCustomerPage> {
         TextField(
           controller: limit,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(labelText: 'السقف الائتماني اختياري'),
+          decoration:
+              const InputDecoration(labelText: 'السقف الائتماني اختياري'),
         ),
         FilledButton(
           onPressed: busy ? null : save,
@@ -1424,6 +1606,58 @@ class CustomerPage extends StatelessWidget {
     }
   }
 
+  Future<void> deleteCustomer(BuildContext context) async {
+    final balance = store.balance(customer.id);
+    if (balance != 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content:
+                Text('لا يمكن حذف العميل. المتبقي عليه ${money(balance)}')),
+      );
+      return;
+    }
+    if (!store.firebaseReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                'الحذف الآمن يحتاج اتصالاً بالإنترنت للتحقق من الرصيد السحابي.')),
+      );
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('حذف العميل؟'),
+        content: const Text(
+            'سيتم حذف العميل وجميع عملياته بعد التحقق من أن الرصيد السحابي يساوي صفرًا.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('إلغاء')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: burgundy),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('حذف نهائي'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    final ok = await store.deleteCustomer(customer);
+    if (!context.mounted) return;
+    if (ok) {
+      Navigator.pop(context);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content:
+                Text('تم رفض الحذف: الرصيد السحابي ليس صفراً أو تعذر التحقق.')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final rows = store.transactions
@@ -1441,10 +1675,12 @@ class CustomerPage extends StatelessWidget {
               padding: const EdgeInsets.all(18),
               child: Column(
                 children: [
-                  const Icon(Icons.account_balance_wallet_rounded, size: 36, color: emerald),
+                  const Icon(Icons.account_balance_wallet_rounded,
+                      size: 36, color: emerald),
                   Text(
                     money(store.balance(customer.id)),
-                    style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900),
+                    style: const TextStyle(
+                        fontSize: 30, fontWeight: FontWeight.w900),
                   ),
                   Text(
                     'الدَين ${money(store.debts(customer.id))} • '
@@ -1479,12 +1715,21 @@ class CustomerPage extends StatelessWidget {
                           final ok = await makePhoneCall(customer.phone);
                           if (!ok && context.mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('تعذر إجراء الاتصال')),
+                              const SnackBar(
+                                  content: Text('تعذر إجراء الاتصال')),
                             );
                           }
                         },
                         icon: const Icon(Icons.phone_rounded),
                         label: const Text('اتصال'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => deleteCustomer(context),
+                        icon: const Icon(Icons.delete_forever_rounded,
+                            color: burgundy),
+                        label: const Text('حذف العميل'),
+                        style:
+                            OutlinedButton.styleFrom(foregroundColor: burgundy),
                       ),
                     ],
                   ),
@@ -1503,7 +1748,9 @@ class CustomerPage extends StatelessWidget {
             (transaction) => Card(
               child: ListTile(
                 leading: Icon(
-                  transaction.type == 'debt' ? Icons.arrow_downward_rounded : Icons.arrow_upward_rounded,
+                  transaction.type == 'debt'
+                      ? Icons.arrow_downward_rounded
+                      : Icons.arrow_upward_rounded,
                   color: transaction.type == 'debt' ? burgundy : mint,
                 ),
                 title: Text(transaction.type == 'debt' ? 'دَين' : 'تسديد'),
@@ -1528,14 +1775,16 @@ class CustomerPage extends StatelessWidget {
             ? () {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (_) => ActivationPage(store: store)),
+                  MaterialPageRoute(
+                      builder: (_) => ActivationPage(store: store)),
                 );
               }
             : () {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => AddTransactionPage(store: store, customer: customer),
+                    builder: (_) =>
+                        AddTransactionPage(store: store, customer: customer),
                   ),
                 );
               },
@@ -1625,7 +1874,8 @@ class AccountStatementPage extends StatelessWidget {
 }
 
 class AddTransactionPage extends StatefulWidget {
-  const AddTransactionPage({super.key, required this.store, required this.customer});
+  const AddTransactionPage(
+      {super.key, required this.store, required this.customer});
 
   final Store store;
   final Customer customer;
@@ -1662,7 +1912,8 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
 
     if (type == 'payment' && cents > current) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('قيمة التسديد أكبر من المتبقي على العميل')),
+        const SnackBar(
+            content: Text('قيمة التسديد أكبر من المتبقي على العميل')),
       );
       return;
     }
@@ -1704,8 +1955,14 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
       children: [
         SegmentedButton<String>(
           segments: const [
-            ButtonSegment(value: 'debt', label: Text('دَين'), icon: Icon(Icons.arrow_downward)),
-            ButtonSegment(value: 'payment', label: Text('تسديد'), icon: Icon(Icons.arrow_upward)),
+            ButtonSegment(
+                value: 'debt',
+                label: Text('دَين'),
+                icon: Icon(Icons.arrow_downward)),
+            ButtonSegment(
+                value: 'payment',
+                label: Text('تسديد'),
+                icon: Icon(Icons.arrow_upward)),
           ],
           selected: {type},
           onSelectionChanged: (values) {
@@ -1716,7 +1973,8 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
         TextField(
           controller: amount,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(labelText: 'المبلغ', hintText: 'مثال: 150 أو 150.50'),
+          decoration: const InputDecoration(
+              labelText: 'المبلغ', hintText: 'مثال: 150 أو 150.50'),
         ),
         TextField(
           controller: note,
@@ -1820,7 +2078,9 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       if (!available) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون')),
+            const SnackBar(
+                content: Text(
+                    'التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون')),
           );
         }
         return;
@@ -1906,7 +2166,9 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
               ),
             ),
           ...drafts.map((draft) {
-            final customer = widget.store.customers.where((c) => c.id == draft.customerId).firstOrNull;
+            final customer = widget.store.customers
+                .where((c) => c.id == draft.customerId)
+                .firstOrNull;
             return Dismissible(
               key: Key(draft.id),
               direction: DismissDirection.endToStart,
@@ -1925,7 +2187,8 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
               child: Card(
                 child: ListTile(
                   title: Text(customer?.name ?? 'عميل غير محدد'),
-                  subtitle: Text('${draft.text}\nالمبلغ: ${money(draft.amountCents)}'),
+                  subtitle: Text(
+                      '${draft.text}\nالمبلغ: ${money(draft.amountCents)}'),
                   isThreeLine: true,
                   trailing: IconButton(
                     icon: const Icon(Icons.delete_outline, color: burgundy),
@@ -1938,7 +2201,8 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => VoiceReviewPage(store: widget.store, draft: draft),
+                        builder: (_) =>
+                            VoiceReviewPage(store: widget.store, draft: draft),
                       ),
                     );
                   },
@@ -1996,7 +2260,8 @@ class _VoiceReviewPageState extends State<VoiceReviewPage> {
     if (busy) return;
 
     final cents = parseCents(amount.text);
-    final customer = widget.store.customers.where((c) => c.id == customerId).firstOrNull;
+    final customer =
+        widget.store.customers.where((c) => c.id == customerId).firstOrNull;
 
     if (customer == null || cents <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2014,7 +2279,9 @@ class _VoiceReviewPageState extends State<VoiceReviewPage> {
       return;
     }
 
-    if (type == 'debt' && customer.limitCents > 0 && current + cents > customer.limitCents) {
+    if (type == 'debt' &&
+        customer.limitCents > 0 &&
+        current + cents > customer.limitCents) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('العملية تتجاوز السقف الائتماني')),
       );
@@ -2039,7 +2306,8 @@ class _VoiceReviewPageState extends State<VoiceReviewPage> {
       return;
     }
 
-    widget.store.voiceDrafts.removeWhere((draft) => draft.id == widget.draft.id);
+    widget.store.voiceDrafts
+        .removeWhere((draft) => draft.id == widget.draft.id);
     await widget.store.saveLocal();
 
     if (!mounted) return;
@@ -2048,7 +2316,9 @@ class _VoiceReviewPageState extends State<VoiceReviewPage> {
 
   @override
   Widget build(BuildContext context) {
-    final validId = widget.store.customers.any((c) => c.id == customerId) ? customerId : null;
+    final validId = widget.store.customers.any((c) => c.id == customerId)
+        ? customerId
+        : null;
 
     return PageForm(
       title: 'مراجعة التسجيل الصوتي',
@@ -2066,7 +2336,8 @@ class _VoiceReviewPageState extends State<VoiceReviewPage> {
           value: validId,
           decoration: const InputDecoration(labelText: 'العميل'),
           items: widget.store.customers
-              .map((customer) => DropdownMenuItem(value: customer.id, child: Text(customer.name)))
+              .map((customer) => DropdownMenuItem(
+                  value: customer.id, child: Text(customer.name)))
               .toList(),
           onChanged: (value) => setState(() => customerId = value ?? ''),
         ),
@@ -2198,10 +2469,94 @@ class _SettingsPageState extends State<SettingsPage> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => VoiceDraftsPage(store: store)),
+                MaterialPageRoute(
+                    builder: (_) => VoiceDraftsPage(store: store)),
               );
             },
             child: const Text('المسودات الصوتية'),
+          ),
+          Card(
+            child: Column(
+              children: [
+                const ListTile(
+                  leading: Icon(Icons.cloud_sync_rounded),
+                  title: Text('النسخة الاحتياطية الآمنة'),
+                  subtitle: Text('نسخة مشفرة في Google Drive الخاص بالحساب.'),
+                ),
+                if (store.lastBackupAt != null)
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.history_rounded),
+                    title: const Text('آخر نسخة ناجحة'),
+                    subtitle: Text(
+                        '${dateText(store.lastBackupAt!)} ${timeText(store.lastBackupAt!)}'),
+                  ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final result = await store.backupToGoogleDrive();
+                    if (!context.mounted) return;
+                    if (result.success) {
+                      await showDialog<void>(
+                        context: context,
+                        builder: (_) => AlertDialog(
+                          title: const Text('تم تأمين النسخة'),
+                          content: SelectableText(
+                            'تم حفظ نسخة مشفرة في حساب Google.\n\nرمز الاسترداد الخاص بك:\n${store.backupRecoveryCode}\n\nاحفظ هذا الرمز خارج الهاتف. بدونه لا يمكن فك النسخة بعد تغيير الجهاز.',
+                          ),
+                          actions: [
+                            TextButton(
+                                onPressed: () => Navigator.pop(context),
+                                child: const Text('حفظت الرمز')),
+                          ],
+                        ),
+                      );
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(result.message)));
+                    }
+                  },
+                  icon: const Icon(Icons.cloud_upload_rounded),
+                  label: const Text('إنشاء / تحديث النسخة الاحتياطية'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final controller = TextEditingController();
+                    final recovery = await showDialog<String>(
+                      context: context,
+                      builder: (_) => AlertDialog(
+                        title: const Text('استعادة النسخة الاحتياطية'),
+                        content: TextField(
+                          controller: controller,
+                          autofocus: true,
+                          textCapitalization: TextCapitalization.characters,
+                          decoration:
+                              const InputDecoration(labelText: 'رمز الاسترداد'),
+                        ),
+                        actions: [
+                          TextButton(
+                              onPressed: () => Navigator.pop(context),
+                              child: const Text('إلغاء')),
+                          FilledButton(
+                              onPressed: () => Navigator.pop(
+                                  context, controller.text.trim()),
+                              child: const Text('استعادة')),
+                        ],
+                      ),
+                    );
+                    controller.dispose();
+                    if (recovery == null ||
+                        recovery.isEmpty ||
+                        !context.mounted) return;
+                    final result = await store.restoreFromGoogleDrive(recovery);
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(SnackBar(content: Text(result.message)));
+                  },
+                  icon: const Icon(Icons.cloud_download_rounded),
+                  label: const Text('استعادة البيانات من Google Drive'),
+                ),
+              ],
+            ),
           ),
           OutlinedButton(
             onPressed: () {
@@ -2242,7 +2597,9 @@ class _ActivationPageState extends State<ActivationPage> {
 
     if (!widget.store.firebaseReady) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('لا يوجد اتصال بالخدمة حالياً. حاول بعد الاتصال بالإنترنت.')),
+        const SnackBar(
+            content: Text(
+                'لا يوجد اتصال بالخدمة حالياً. حاول بعد الاتصال بالإنترنت.')),
       );
       return;
     }
@@ -2264,7 +2621,7 @@ class _ActivationPageState extends State<ActivationPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          ok ? 'تم التفعيل الدائم بنجاح' : 'الكود غير صحيح أو مستخدم أو مخصص لجهاز آخر',
+          ok ? 'تم التفعيل الدائم بنجاح' : 'الكود غير صحيح أو مستخدم',
         ),
       ),
     );
@@ -2295,25 +2652,14 @@ class _ActivationPageState extends State<ActivationPage> {
                         ? 'التطبيق مفعّل بصفة دائمة'
                         : 'المتبقي من التجربة: ${store.trialDaysLeft} أيام',
                     textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 8),
-                  SelectableText('رقم الجهاز: ${store.deviceId}'),
                 ],
               ),
             ),
           ),
-          FilledButton.icon(
-            onPressed: () {
-              launchWhatsApp(
-                '+218934951072',
-                'طلب تفعيل DainPay - رقم الجهاز: ${store.deviceId}',
-              );
-            },
-            icon: const Icon(Icons.chat),
-            label: const Text('طلب رمز عبر واتساب'),
-          ),
-          const SizedBox(height: 12),
           TextField(
             controller: code,
             keyboardType: TextInputType.number,
@@ -2404,26 +2750,16 @@ class AdminPage extends StatefulWidget {
 }
 
 class _AdminPageState extends State<AdminPage> {
-  final device = TextEditingController();
   String result = '';
   bool busy = false;
 
   @override
   void dispose() {
-    device.dispose();
     super.dispose();
   }
 
   Future<void> generate() async {
     if (busy) return;
-
-    final target = device.text.trim();
-    if (target.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('أدخل Device ID للعميل')),
-      );
-      return;
-    }
 
     if (!widget.store.firebaseReady) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2433,7 +2769,14 @@ class _AdminPageState extends State<AdminPage> {
     }
 
     setState(() => busy = true);
-    final generated = await widget.store.generateCode(target);
+    String? generated;
+    try {
+      generated = await widget.store.generateCode();
+    } on FirebaseException catch (e) {
+      generated = 'Firebase ${e.code}: ${e.message ?? ''}'.trim();
+    } catch (e) {
+      generated = 'خطأ: $e';
+    }
 
     if (!mounted) return;
     setState(() {
@@ -2455,17 +2798,19 @@ class _AdminPageState extends State<AdminPage> {
             child: ListTile(
               leading: const Icon(Icons.admin_panel_settings_outlined),
               title: const Text('وضع المالك'),
-              subtitle: Text(store.firebaseReady ? 'متصل بـ Firebase' : 'غير متصل بـ Firebase'),
+              subtitle: Text(store.firebaseReady
+                  ? 'متصل بـ Firebase'
+                  : 'غير متصل بـ Firebase'),
             ),
           ),
-          TextField(
-            controller: device,
-            decoration: const InputDecoration(
-              labelText: 'Device ID للعميل',
-              hintText: 'مثال: DP-...',
+          const Card(
+            child: ListTile(
+              leading: Icon(Icons.vpn_key_rounded),
+              title: Text('رمز دائم لمرة واحدة'),
+              subtitle:
+                  Text('الرمز غير مرتبط بالهاتف ويمكن استخدامه مرة واحدة فقط.'),
             ),
           ),
-          const SizedBox(height: 12),
           FilledButton(
             onPressed: busy ? null : generate,
             child: Text(busy ? 'جارٍ التوليد...' : 'توليد رمز تفعيل'),
@@ -2476,7 +2821,8 @@ class _AdminPageState extends State<AdminPage> {
                 title: const Text('رمز التفعيل'),
                 subtitle: SelectableText(
                   result,
-                  style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w900),
+                  style: const TextStyle(
+                      fontSize: 25, fontWeight: FontWeight.w900),
                 ),
                 trailing: result.length == 6
                     ? IconButton(

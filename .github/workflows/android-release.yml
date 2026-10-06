@@ -78,7 +78,7 @@ jobs:
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
         run: |
           if [ -n "$FIREBASE_TOKEN" ]; then
-            npx --yes firebase-tools deploy --only firestore:rules --project dainpay-a29fc --token "$FIREBASE_TOKEN"
+            npx --yes firebase-tools deploy --only firestore:rules,functions --project dainpay-a29fc --token "$FIREBASE_TOKEN"
           else
             echo "FIREBASE_TOKEN is not configured; skipping live Firestore rules deployment."
           fi

@@ -6,7 +6,7 @@ import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_functions/firebase_functions.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'backup_service.dart';
 import 'package:flutter/material.dart';
@@ -428,7 +428,7 @@ class Store extends ChangeNotifier {
   DateTime? lastBackupAt;
   DateTime? lastLocalBackupAt;
   String backupGoogleEmail = '';
-  final FlutterSecureStorage secureStorage = const FlutterSecureStorage();
+  final FlutterSecureStorage secureStorage = FlutterSecureStorage();
 
   bool _disposed = false;
   bool _syncQueued = false;

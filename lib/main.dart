@@ -1727,11 +1727,22 @@ class CustomerPage extends StatelessWidget {
 
   Future<void> deleteCustomer(BuildContext context) async {
     final balance = store.balance(customer.id);
+    final credit = store.prepaidCredit(customer.id);
     if (balance != 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             content:
                 Text('لا يمكن حذف العميل. المتبقي عليه ${money(balance)}')),
+      );
+      return;
+    }
+    if (credit != 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'لا يمكن حذف العميل. لديه رصيد مسبق ${money(credit)} محفوظ للمشتريات القادمة.',
+          ),
+        ),
       );
       return;
     }
@@ -1805,6 +1816,18 @@ class CustomerPage extends StatelessWidget {
                     'الدَين ${money(store.debts(customer.id))} • '
                     'المسدد ${money(store.paid(customer.id))}',
                   ),
+                  if (store.prepaidCredit(customer.id) > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        'رصيد مسبق ${money(store.prepaidCredit(customer.id))} '
+                        'متاح للعمليات القادمة',
+                        style: const TextStyle(
+                          color: emerald,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
                   const SizedBox(height: 8),
                   Wrap(
                     spacing: 8,

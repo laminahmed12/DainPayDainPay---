@@ -1169,7 +1169,7 @@ class Store extends ChangeNotifier {
     }
   }
 
-  bool checkAdminLocal  bool checkAdminLocal(String pin) {
+  bool checkAdminLocal(String pin) {
     final valid = _digits(pin).trim() == adminPin;
     isAdmin = valid;
     safeNotify();

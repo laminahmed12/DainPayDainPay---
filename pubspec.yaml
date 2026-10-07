@@ -1,7 +1,7 @@
 name: dainpay
 description: DainPay - دفتر الديون للأفراد والتجار في ليبيا.
 publish_to: "none"
-version: 1.6.3+17
+version: 1.6.4+18
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

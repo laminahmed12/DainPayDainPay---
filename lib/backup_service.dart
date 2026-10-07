@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
@@ -68,7 +67,21 @@ class DainPayBackupService {
     return true;
   }
 
-  Future<Map<String, dynamic>> restoreLocal(String localKey) async {
+  Future<Map<String, dynamic>> restoreLocal({
+    required String localKey,
+    String? legacyKey,
+  }) async {
+    try {
+      return await _restoreLocalWithKey(localKey);
+    } catch (_) {
+      if (legacyKey != null && legacyKey.trim().isNotEmpty) {
+        return _restoreLocalWithKey(legacyKey);
+      }
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> _restoreLocalWithKey(String localKey) async {
     final files = <File>[await _localFile(_localA), await _localFile(_localB)];
     final candidates = <Map<String, dynamic>>[];
 
@@ -77,7 +90,9 @@ class DainPayBackupService {
       try {
         final text = await file.readAsString();
         final envelope = jsonDecode(text);
-        final createdAt = DateTime.tryParse('${envelope is Map ? envelope['createdAt'] : ''}');
+        final createdAt = DateTime.tryParse(
+          '${envelope is Map ? envelope['createdAt'] : ''}',
+        );
         final payload = await decrypt(text, localKey);
         candidates.add({
           'payload': payload,
@@ -89,11 +104,13 @@ class DainPayBackupService {
     }
 
     if (candidates.isEmpty) {
-      throw StateError('لم يتم العثور على نسخة محلية سليمة');
+      throw StateError('لم يتم العثور على نسخة محلية سليمة قابلة للاستعادة');
     }
 
-    candidates.sort((a, b) =>
-        (b['createdAt'] as DateTime).compareTo(a['createdAt'] as DateTime));
+    candidates.sort(
+      (a, b) => (b['createdAt'] as DateTime)
+          .compareTo(a['createdAt'] as DateTime),
+    );
     return Map<String, dynamic>.from(candidates.first['payload'] as Map);
   }
 

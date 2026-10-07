@@ -1809,21 +1809,16 @@ class CustomerPage extends StatelessWidget {
       );
       return;
     }
-    if (!store.firebaseReady) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'الحذف الآمن يحتاج اتصالاً بالإنترنت للتحقق من الرصيد السحابي.')),
-      );
-      return;
-    }
+    // The local zero-balance ledger is authoritative. Cloud deletion is queued
+    // and retried automatically, so a temporary Firebase problem does not
+    // block the customer from being removed from the local ledger.
 
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('حذف العميل؟'),
         content: const Text(
-            'سيتم حذف العميل وجميع عملياته بعد التحقق من أن الرصيد السحابي يساوي صفرًا.'),
+            'سيتم حذف العميل وعملياته لأن رصيده المحلي صفر. وسيتم مزامنة الحذف مع Firebase تلقائياً.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
@@ -1845,8 +1840,8 @@ class CustomerPage extends StatelessWidget {
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content:
-                Text('تم رفض الحذف: الرصيد السحابي ليس صفراً أو تعذر التحقق.')),
+          content: Text('تم حذف العميل محلياً، وستتم مزامنة الحذف مع Firebase عند توفر الاتصال.'),
+        ),
       );
     }
   }

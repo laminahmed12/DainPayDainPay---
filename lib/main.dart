@@ -901,7 +901,16 @@ class Store extends ChangeNotifier {
       final payload = await backupService.restore(
         legacyKey: legacyBackupRecoveryCode,
       );
-      return _applyBackupPayload(payload);
+      final result = await _applyBackupPayload(payload);
+      if (result.success) {
+        backupGoogleEmail =
+            backupService.currentGoogleEmail ?? backupGoogleEmail;
+        await _pref(() => prefs.setString(
+              'backup_google_email',
+              backupGoogleEmail,
+            ));
+      }
+      return result;
     } catch (e) {
       return DainPayBackupResult(
         success: false,
@@ -2664,7 +2673,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   subtitle: Text(
                     store.backupGoogleEmail.isEmpty
                         ? 'نسخة محلية مشفرة تلقائياً + نسخة Google Drive للحساب الذي تختاره.'
-                        : 'Google Drive: ${store.backupGoogleEmail}',
+                        : 'حساب Google للنسخة: ${store.backupGoogleEmail}',
                   ),
                 ),
                 if (store.lastLocalBackupAt != null)
@@ -2978,7 +2987,9 @@ class _AdminPageState extends State<AdminPage> {
     } on FirebaseException catch (e) {
       generated = 'Firebase ${e.code}: ${e.message ?? ''}'.trim();
     } catch (e) {
-      generated = 'خطأ: $e';
+      generated = e is StateError
+          ? e.message
+          : 'تعذر توليد رمز التفعيل حالياً.';
     }
 
     if (!mounted) return;

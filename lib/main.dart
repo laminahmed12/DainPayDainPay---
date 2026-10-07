@@ -1286,13 +1286,20 @@ class Store extends ChangeNotifier {
       final code = (100000 + Random.secure().nextInt(900000)).toString();
       final ref = activationCodesRef.doc(code);
       try {
-        await ref.create({
-          'used': false,
-          'createdAt': FieldValue.serverTimestamp(),
-          'createdByUid': uid,
-          'deviceId': deviceId,
+        final created = await FirebaseFirestore.instance
+            .runTransaction<bool>((tx) async {
+          final existing = await tx.get(ref);
+          if (existing.exists) return false;
+
+          tx.set(ref, {
+            'used': false,
+            'createdAt': FieldValue.serverTimestamp(),
+            'createdByUid': uid,
+            'deviceId': deviceId,
+          });
+          return true;
         });
-        return code;
+        if (created) return code;
       } on FirebaseException catch (e) {
         if (e.code == 'already-exists') continue;
         rethrow;

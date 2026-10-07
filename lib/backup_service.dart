@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -31,11 +32,13 @@ class DainPayBackupService {
   static const _localA = 'DainPay_Backup_A.dpb';
   static const _localB = 'DainPay_Backup_B.dpb';
   static const _mime = 'application/octet-stream';
-  static const _schema = 2;
+  static const _schema = 3;
 
   final GoogleSignIn _google = GoogleSignIn(scopes: const [_scope]);
   final http.Client _client = http.Client();
   final AesGcm _aes = AesGcm.with256bits();
+
+  Future<void> _localWriteQueue = Future<void>.value();
 
   Future<Directory> _backupDirectory() async {
     return getApplicationDocumentsDirectory();
@@ -49,21 +52,52 @@ class DainPayBackupService {
   Future<bool> saveLocal({
     required Map<String, dynamic> payload,
     required String localKey,
+  }) {
+    final operation = _localWriteQueue.then(
+      (_) => _saveLocalNow(payload: payload, localKey: localKey),
+    );
+    _localWriteQueue = operation.then<void>(
+      (_) {},
+      onError: (_) {},
+    );
+    return operation;
+  }
+
+  Future<bool> _saveLocalNow({
+    required Map<String, dynamic> payload,
+    required String localKey,
   }) async {
     final encrypted = await encrypt(payload, localKey);
     final fileA = await _localFile(_localA);
     final fileB = await _localFile(_localB);
-    final target = await fileA.exists() && !await fileB.exists()
-        ? fileB
-        : await fileB.exists() && !await fileA.exists()
-            ? fileA
-            : (DateTime.now().millisecondsSinceEpoch.isEven ? fileA : fileB);
+
+    final aExists = await fileA.exists();
+    final bExists = await fileB.exists();
+
+    final File target;
+    if (!aExists && bExists) {
+      target = fileA;
+    } else if (aExists && !bExists) {
+      target = fileB;
+    } else {
+      target =
+          DateTime.now().millisecondsSinceEpoch.isEven ? fileA : fileB;
+    }
+
     final temp = File('${target.path}.tmp');
     await temp.writeAsString(encrypted, flush: true);
+
+    // Verify the encrypted envelope before replacing the previous good copy.
+    await decrypt(encrypted, localKey);
+
     if (await target.exists()) {
       await target.delete();
     }
     await temp.rename(target.path);
+
+    // Verify the file after the atomic rename as well.
+    final written = await target.readAsString();
+    await decrypt(written, localKey);
     return true;
   }
 
@@ -104,7 +138,7 @@ class DainPayBackupService {
     }
 
     if (candidates.isEmpty) {
-      throw StateError('لم يتم العثور على نسخة محلية سليمة قابلة للاستعادة');
+      throw StateError('لا توجد نسخة محلية سليمة على هذا الجهاز');
     }
 
     candidates.sort(
@@ -141,17 +175,17 @@ class DainPayBackupService {
   }
 
   String driveKeyForAccountId(String accountId) {
-    return 'DainPay-Drive-Key-v3-2026-Account-Bound:$accountId';
+    return 'DainPay-Drive-Key-v4-2026-Account-Bound:$accountId';
   }
 
-  Future<List<int>> _deriveKey(String recoveryCode, List<int> salt) async {
+  Future<List<int>> _deriveKey(String secret, List<int> salt) async {
     final kdf = Pbkdf2(
       macAlgorithm: Hmac.sha256(),
       iterations: 120000,
       bits: 256,
     );
     final key = await kdf.deriveKeyFromPassword(
-      password: recoveryCode.trim().toUpperCase(),
+      password: secret.trim().toUpperCase(),
       nonce: salt,
     );
     return key.extractBytes();
@@ -159,10 +193,10 @@ class DainPayBackupService {
 
   Future<String> encrypt(
     Map<String, dynamic> payload,
-    String recoveryCode,
+    String secret,
   ) async {
     final salt = _aes.newNonce();
-    final keyBytes = await _deriveKey(recoveryCode, salt);
+    final keyBytes = await _deriveKey(secret, salt);
     final key = SecretKey(keyBytes);
     final clear = utf8.encode(jsonEncode(payload));
     final box = await _aes.encrypt(clear, secretKey: key);
@@ -181,7 +215,7 @@ class DainPayBackupService {
 
   Future<Map<String, dynamic>> decrypt(
     String text,
-    String recoveryCode,
+    String secret,
   ) async {
     final envelope = jsonDecode(text);
     if (envelope is! Map ||
@@ -191,7 +225,7 @@ class DainPayBackupService {
 
     final salt = base64Decode('${envelope['salt']}');
     final raw = base64Decode('${envelope['secretBox']}');
-    final keyBytes = await _deriveKey(recoveryCode, salt);
+    final keyBytes = await _deriveKey(secret, salt);
     final key = SecretKey(keyBytes);
     final box = SecretBox.fromConcatenation(
       raw,
@@ -207,11 +241,15 @@ class DainPayBackupService {
   }
 
   Future<String?> _findFile(String token) async {
+    final query = Uri.encodeQueryComponent(
+      "name = '$_fileName' and trashed = false",
+    );
     final uri = Uri.parse(
       'https://www.googleapis.com/drive/v3/files'
       '?spaces=appDataFolder'
-      '&q=${Uri.encodeQueryComponent("name = '$_fileName' and trashed = false")}'
-      '&pageSize=10&fields=files(id,name,modifiedTime)',
+      '&q=$query'
+      '&pageSize=10&orderBy=modifiedTime desc'
+      '&fields=files(id,name,modifiedTime)',
     );
     final response = await _client.get(
       uri,
@@ -220,6 +258,7 @@ class DainPayBackupService {
     if (response.statusCode != 200) {
       throw Exception('Drive list failed: ${response.statusCode}');
     }
+
     final data = jsonDecode(response.body);
     final files = data['files'];
     if (files is List && files.isNotEmpty) {
@@ -234,6 +273,7 @@ class DainPayBackupService {
     String? fileId,
   }) async {
     final bytes = utf8.encode(content);
+
     if (fileId == null) {
       final boundary = 'dainpay_${DateTime.now().microsecondsSinceEpoch}';
       final metadata = jsonEncode({
@@ -243,7 +283,8 @@ class DainPayBackupService {
       final body = <int>[];
       body.addAll(utf8.encode('--$boundary\r\n'));
       body.addAll(utf8.encode(
-          'Content-Type: application/json; charset=UTF-8\r\n\r\n'));
+        'Content-Type: application/json; charset=UTF-8\r\n\r\n',
+      ));
       body.addAll(utf8.encode(metadata));
       body.addAll(utf8.encode('\r\n--$boundary\r\n'));
       body.addAll(utf8.encode('Content-Type: $_mime\r\n\r\n'));
@@ -323,6 +364,7 @@ class DainPayBackupService {
       final token = await _accessToken();
       final account = _google.currentUser;
       email = account?.email;
+
       if (token != null && account != null) {
         final driveKey = driveKeyForAccountId(account.id);
         final encrypted = await encrypt(payload, driveKey);
@@ -371,6 +413,7 @@ class DainPayBackupService {
   }) async {
     final token = await _accessToken();
     final account = _google.currentUser;
+
     if (token == null || account == null) {
       throw StateError('اختر حساب Google أولاً');
     }
@@ -386,7 +429,7 @@ class DainPayBackupService {
         encrypted,
         driveKeyForAccountId(account.id),
       );
-    } catch (e) {
+    } catch (_) {
       if (legacyKey != null && legacyKey.trim().isNotEmpty) {
         return decrypt(encrypted, legacyKey);
       }

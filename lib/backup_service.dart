@@ -14,7 +14,6 @@ class DainPayBackupResult {
   const DainPayBackupResult({
     required this.success,
     this.message = '',
-    this.recoveryCode,
     this.accountEmail,
     this.localSaved = false,
     this.cloudSaved = false,
@@ -22,7 +21,6 @@ class DainPayBackupResult {
 
   final bool success;
   final String message;
-  final String? recoveryCode;
   final String? accountEmail;
   final bool localSaved;
   final bool cloudSaved;
@@ -51,9 +49,9 @@ class DainPayBackupService {
 
   Future<bool> saveLocal({
     required Map<String, dynamic> payload,
-    required String recoveryCode,
+    required String localKey,
   }) async {
-    final encrypted = await encrypt(payload, recoveryCode);
+    final encrypted = await encrypt(payload, localKey);
     final fileA = await _localFile(_localA);
     final fileB = await _localFile(_localB);
     final target = await fileA.exists() && !await fileB.exists()
@@ -70,7 +68,7 @@ class DainPayBackupService {
     return true;
   }
 
-  Future<Map<String, dynamic>> restoreLocal(String recoveryCode) async {
+  Future<Map<String, dynamic>> restoreLocal(String localKey) async {
     final files = <File>[await _localFile(_localA), await _localFile(_localB)];
     final candidates = <Map<String, dynamic>>[];
 
@@ -80,7 +78,7 @@ class DainPayBackupService {
         final text = await file.readAsString();
         final envelope = jsonDecode(text);
         final createdAt = DateTime.tryParse('${envelope is Map ? envelope['createdAt'] : ''}');
-        final payload = await decrypt(text, recoveryCode);
+        final payload = await decrypt(text, localKey);
         candidates.add({
           'payload': payload,
           'createdAt': createdAt ?? DateTime.fromMillisecondsSinceEpoch(0),
@@ -125,13 +123,8 @@ class DainPayBackupService {
     await _google.signOut();
   }
 
-  String generateRecoveryCode() {
-    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    final random = Random.secure();
-    return List.generate(
-      20,
-      (_) => alphabet[random.nextInt(alphabet.length)],
-    ).join();
+  String driveKeyForAccountId(String accountId) {
+    return 'DainPay-Drive-Key-v3-2026-Account-Bound:$accountId';
   }
 
   Future<List<int>> _deriveKey(String recoveryCode, List<int> salt) async {
@@ -293,9 +286,8 @@ class DainPayBackupService {
 
   Future<DainPayBackupResult> backup({
     required Map<String, dynamic> payload,
-    required String recoveryCode,
+    required String localKey,
   }) async {
-    final encrypted = await encrypt(payload, recoveryCode);
     var localSaved = false;
     var cloudSaved = false;
     String? email;
@@ -304,7 +296,7 @@ class DainPayBackupService {
     try {
       localSaved = await saveLocal(
         payload: payload,
-        recoveryCode: recoveryCode,
+        localKey: localKey,
       );
     } catch (e) {
       debugPrint('Local backup failed: $e');
@@ -312,8 +304,11 @@ class DainPayBackupService {
 
     try {
       final token = await _accessToken();
-      email = _google.currentUser?.email;
-      if (token != null) {
+      final account = _google.currentUser;
+      email = account?.email;
+      if (token != null && account != null) {
+        final driveKey = driveKeyForAccountId(account.id);
+        final encrypted = await encrypt(payload, driveKey);
         final existing = await _findFile(token);
         await _upload(token, encrypted, fileId: existing);
         cloudSaved = true;
@@ -329,7 +324,6 @@ class DainPayBackupService {
         message: email == null
             ? 'تم حفظ النسخة محلياً وفي Google Drive.'
             : 'تم حفظ النسخة المشفرة محلياً وفي Google Drive لحساب: $email',
-        recoveryCode: recoveryCode,
         accountEmail: email,
         localSaved: localSaved,
         cloudSaved: true,
@@ -342,7 +336,6 @@ class DainPayBackupService {
         message: cloudError == null
             ? 'تم حفظ النسخة المشفرة محلياً.'
             : 'تم حفظ نسخة محلية مشفرة. تعذر الوصول إلى Google Drive حالياً.',
-        recoveryCode: recoveryCode,
         accountEmail: email,
         localSaved: true,
         cloudSaved: false,
@@ -352,28 +345,36 @@ class DainPayBackupService {
     return DainPayBackupResult(
       success: false,
       message: 'فشل النسخ الاحتياطي المحلي والسحابي: $cloudError',
-      recoveryCode: recoveryCode,
       accountEmail: email,
     );
   }
 
   Future<Map<String, dynamic>> restore({
-    required String recoveryCode,
+    String? legacyKey,
   }) async {
-    try {
-      final token = await _accessToken();
-      if (token != null) {
-        final fileId = await _findFile(token);
-        if (fileId != null) {
-          final encrypted = await _download(token, fileId);
-          return decrypt(encrypted, recoveryCode);
-        }
-      }
-    } catch (e) {
-      debugPrint('Google Drive restore unavailable; trying local backup: $e');
+    final token = await _accessToken();
+    final account = _google.currentUser;
+    if (token == null || account == null) {
+      throw StateError('اختر حساب Google أولاً');
     }
 
-    return restoreLocal(recoveryCode);
+    final fileId = await _findFile(token);
+    if (fileId == null) {
+      throw StateError('لا توجد نسخة احتياطية لهذا الحساب');
+    }
+
+    final encrypted = await _download(token, fileId);
+    try {
+      return await decrypt(
+        encrypted,
+        driveKeyForAccountId(account.id),
+      );
+    } catch (e) {
+      if (legacyKey != null && legacyKey.trim().isNotEmpty) {
+        return decrypt(encrypted, legacyKey);
+      }
+      rethrow;
+    }
   }
 
   void dispose() => _client.close();

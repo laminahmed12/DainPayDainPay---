@@ -2,3 +2,4 @@ DainPay 1.6.3+17 screenshot fixes: account-only backup recovery, prepaid overpay
 Workflow Kotlin DSL fix applied: 2026-10-07T05:04Z
 Analyze fix: CardThemeData.
 speech_to_text upgraded to 7.5.0 for Android build compatibility.
+speech_to_text pinned to 7.4.0 for Dart 3.9 compatibility.

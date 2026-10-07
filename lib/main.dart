@@ -1133,7 +1133,7 @@ class DainPayApp extends StatelessWidget {
           ? const Color(0xFFF6F9FA)
           : const Color(0xFF101719),
       appBarTheme: const AppBarTheme(centerTitle: true),
-      cardTheme: CardThemeData(
+      cardTheme: CardTheme(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         elevation: 1,
         margin: const EdgeInsets.symmetric(vertical: 5),

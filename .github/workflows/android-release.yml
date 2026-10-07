@@ -3,7 +3,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage, repair-v84-all-screenshot-issues ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed, repair-v74-controlled-4 ]
   workflow_dispatch:
@@ -83,19 +83,44 @@ jobs:
             echo "FIREBASE_TOKEN is not configured; skipping live Firestore rules deployment."
           fi
 
-      - name: Add required Android permissions
+      - name: Add required Android speech permissions and recognition query
         run: |
           python3 - <<'PY'
           from pathlib import Path
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           text = manifest.read_text()
-          permissions = ['android.permission.INTERNET','android.permission.RECORD_AUDIO','android.permission.MODIFY_AUDIO_SETTINGS']
-          insert = ''.join(f'    <uses-permission android:name="{p}"/>\n' for p in permissions)
-          if 'android.permission.INTERNET' not in text:
-              end = text.find('>')
-              text = text[:end + 1] + '\n' + insert + text[end + 1:]
+
+          permissions = [
+              'android.permission.INTERNET',
+              'android.permission.RECORD_AUDIO',
+              'android.permission.MODIFY_AUDIO_SETTINGS',
+          ]
+
+          manifest_end = text.find('>')
+          if manifest_end < 0:
+              raise SystemExit('Invalid AndroidManifest.xml')
+
+          header = text[:manifest_end + 1]
+          body = text[manifest_end + 1:]
+
+          for permission in permissions:
+              if f'android:name="{permission}"' not in text:
+                  header += f'\n    <uses-permission android:name="{permission}"/>'
+          text = header + body
+
+          if 'android.speech.RecognitionService' not in text:
+              marker = '    <queries>\n        <intent>\n            <action android:name="android.speech.RecognitionService" />\n        </intent>\n    </queries>\n'
+              app_index = text.find('    <application')
+              if app_index < 0:
+                  raise SystemExit('Android application tag not found')
+              text = text[:app_index] + marker + text[app_index:]
+
           manifest.write_text(text)
           PY
+      - name: Verify Android speech configuration
+        run: |
+          grep -q 'android.permission.RECORD_AUDIO' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.speech.RecognitionService' android/app/src/main/AndroidManifest.xml
       - name: Analyze code
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
       - name: Build release APK
@@ -107,7 +132,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v83-all-screenshot-fixes-release
+          name: dainpay-v84-all-screenshot-fixes-release
           path: |
             build/app/outputs/flutter-apk/app-release.apk
             release-signing-certificate.txt

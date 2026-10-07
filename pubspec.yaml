@@ -1,7 +1,7 @@
 name: dainpay
 description: DainPay - دفتر الديون للأفراد والتجار في ليبيا.
 publish_to: "none"
-version: 1.6.4+18
+version: 1.6.5+19
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -15,7 +15,7 @@ dependencies:
   firebase_auth: ^5.3.3
   cloud_functions: ^5.6.2
   url_launcher: ^6.3.1
-  speech_to_text: ^7.4.0
+  speech_to_text: 6.6.2
   google_sign_in: ^6.2.2
   path_provider: ^2.1.5
   flutter_secure_storage: ^10.3.4

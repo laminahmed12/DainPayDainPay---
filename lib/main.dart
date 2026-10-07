@@ -872,7 +872,7 @@ class Store extends ChangeNotifier {
       debugPrint('Local restore error: $e');
       return const DainPayBackupResult(
         success: false,
-        message: 'تعذر فتح النسخة المحلية. استخدم استعادة Google Drive بالحساب نفسه إذا كانت النسخة السحابية موجودة.',
+        message: 'لا توجد نسخة محلية سليمة قابلة للاستعادة على هذا الجهاز. استخدم Google Drive لاختيار حساب العميل واستعادة النسخة السحابية.',
       );
     }
   }
@@ -1023,23 +1023,19 @@ class Store extends ChangeNotifier {
     if (!RegExp(r'^\d{6}$').hasMatch(clean)) return false;
 
     try {
-      HttpsCallableResult result;
-      try {
-        result = await FirebaseFunctions.instanceFor(
-          region: 'europe-west1',
-        ).httpsCallable('redeemActivationCode').call({
-          'code': clean,
-          'deviceId': deviceId,
-        });
-      } on FirebaseFunctionsException catch (e) {
-        if (e.code != 'not-found') rethrow;
-        result = await FirebaseFunctions.instanceFor(
-          region: 'us-central1',
-        ).httpsCallable('redeemActivationCode').call({
-          'code': clean,
-          'deviceId': deviceId,
-        });
-      }
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'redeemActivationCode',
+        options: HttpsCallableOptions(
+          timeout: const Duration(seconds: 30),
+        ),
+      );
+
+      final result = await callable.call({
+        'code': clean,
+        'deviceId': deviceId,
+      });
 
       final data = result.data;
       if (data is Map && data['success'] == true) {
@@ -1050,46 +1046,8 @@ class Store extends ChangeNotifier {
       }
       return false;
     } on FirebaseFunctionsException catch (e) {
-      if (e.code != 'not-found') {
-        debugPrint('Activation function error: ' + e.code + ': ' + (e.message ?? ''));
-        return false;
-      }
-
-      // Compatibility with the currently deployed legacy Firestore rules.
-      try {
-        final ref = activationCodesRef.doc(clean);
-        final valid = await FirebaseFirestore.instance.runTransaction<bool>(
-          (tx) async {
-            final snap = await tx.get(ref);
-            if (!snap.exists) return false;
-            final data = snap.data() ?? <String, dynamic>{};
-            if (data['used'] == true) return false;
-            tx.update(ref, {
-              'used': true,
-              'usedAt': Timestamp.now(),
-              'usedUid': uid,
-              'usedDeviceId': deviceId,
-            });
-            return true;
-          },
-        );
-
-        if (!valid) return false;
-
-        await userRef.doc(uid).set({
-          'activated': true,
-          'activatedAt': Timestamp.now(),
-          'activatedDeviceId': deviceId,
-        }, SetOptions(merge: true));
-
-        activated = true;
-        await saveLocal();
-        safeNotify();
-        return true;
-      } catch (fallbackError) {
-        debugPrint('Legacy activation fallback error: ' + fallbackError.toString());
-        return false;
-      }
+      debugPrint('Activation function error: ' + e.code + ': ' + (e.message ?? ''));
+      return false;
     } catch (e) {
       debugPrint('Activation error: ' + e.toString());
       return false;
@@ -1100,23 +1058,19 @@ class Store extends ChangeNotifier {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
 
     try {
-      HttpsCallableResult result;
-      try {
-        result = await FirebaseFunctions.instanceFor(
-          region: 'europe-west1',
-        ).httpsCallable('generateActivationCode').call({
-          'adminPin': adminPin,
-          'deviceId': deviceId,
-        });
-      } on FirebaseFunctionsException catch (e) {
-        if (e.code != 'not-found') rethrow;
-        result = await FirebaseFunctions.instanceFor(
-          region: 'us-central1',
-        ).httpsCallable('generateActivationCode').call({
-          'adminPin': adminPin,
-          'deviceId': deviceId,
-        });
-      }
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'generateActivationCode',
+        options: HttpsCallableOptions(
+          timeout: const Duration(seconds: 30),
+        ),
+      );
+
+      final result = await callable.call({
+        'adminPin': adminPin,
+        'deviceId': deviceId,
+      });
 
       final data = result.data;
       if (data is Map && data['code'] is String) {
@@ -1124,51 +1078,25 @@ class Store extends ChangeNotifier {
       }
       throw StateError('استجابة غير صالحة من خدمة التفعيل.');
     } on FirebaseFunctionsException catch (e) {
-      if (e.code != 'not-found') {
-        throw StateError(
-          'تعذر توليد رمز التفعيل: ' + (e.message ?? e.code),
-        );
-      }
-
-      // Compatibility with the currently deployed legacy Firestore rules.
-      try {
-        for (var attempt = 0; attempt < 20; attempt++) {
-          final code =
-              (100000 + Random.secure().nextInt(900000)).toString();
-          final ref = activationCodesRef.doc(code);
-
-          final created =
-              await FirebaseFirestore.instance.runTransaction<bool>(
-            (tx) async {
-              final snap = await tx.get(ref);
-              if (snap.exists) return false;
-
-              tx.set(ref, {
-                'used': false,
-                'createdAt': Timestamp.now(),
-                'createdByUid': uid,
-                'deviceId': deviceId,
-              });
-              return true;
-            },
-          );
-
-          if (created) return code;
-        }
-
-        throw StateError('تعذر إنشاء رمز فريد حالياً.');
-      } on FirebaseException catch (fallbackError) {
-        throw StateError(
-          'تعذر إنشاء رمز التفعيل عبر Firebase: ' +
-              (fallbackError.message ?? fallbackError.code),
-        );
+      debugPrint('Generate activation function error: ' + e.code + ': ' + (e.message ?? ''));
+      switch (e.code) {
+        case 'permission-denied':
+          throw StateError('خدمة التفعيل رفضت الطلب. يجب نشر خدمة Firebase الحالية.');
+        case 'unauthenticated':
+          throw StateError('انتهت جلسة Firebase. أعد الاتصال ثم حاول مرة أخرى.');
+        case 'not-found':
+          throw StateError('خدمة التفعيل غير منشورة حالياً على Firebase.');
+        case 'deadline-exceeded':
+        case 'unavailable':
+          throw StateError('تعذر الوصول إلى خدمة التفعيل حالياً. حاول بعد قليل.');
+        default:
+          throw StateError('تعذر توليد رمز التفعيل حالياً.');
       }
     } catch (e) {
       debugPrint('Generate activation code error: ' + e.toString());
       rethrow;
     }
   }
-
   bool checkAdminLocal(String pin) {
     final valid = _digits(pin).trim() == adminPin;
     isAdmin = valid;
@@ -1205,7 +1133,7 @@ class DainPayApp extends StatelessWidget {
           ? const Color(0xFFF6F9FA)
           : const Color(0xFF101719),
       appBarTheme: const AppBarTheme(centerTitle: true),
-      cardTheme: CardThemeData(
+      cardTheme: CardTheme(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         elevation: 1,
         margin: const EdgeInsets.symmetric(vertical: 5),

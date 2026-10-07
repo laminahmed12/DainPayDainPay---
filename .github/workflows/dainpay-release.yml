@@ -51,26 +51,25 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          settings = Path("android/settings.gradle")
+          settings = Path("android/settings.gradle.kts")
           text = settings.read_text()
-          if 'com.google.gms.google-services' not in text:
+          if "com.google.gms.google-services" not in text:
               text = text.replace(
-                  'plugins {',
-                  'plugins {\n    id "com.google.gms.google-services" version "4.4.2" apply false',
+                  "plugins {",
+                  'plugins {\n    id("com.google.gms.google-services") version "4.4.2" apply false',
                   1,
               )
           settings.write_text(text)
 
-          app = Path("android/app/build.gradle")
+          app = Path("android/app/build.gradle.kts")
           text = app.read_text()
-          if 'id "com.google.gms.google-services"' not in text:
+          if "com.google.gms.google-services" not in text:
               text = text.replace(
-                  'plugins {',
-                  'plugins {\n    id "com.google.gms.google-services"',
+                  "plugins {",
+                  'plugins {\n    id("com.google.gms.google-services")',
                   1,
               )
-          text = text.replace("flutter.minSdkVersion", "23")
-          text = text.replace('applicationId "com.example.dainpay"', 'applicationId "com.adreemk.dainpay"')
+          text = text.replace("minSdk = flutter.minSdkVersion", "minSdk = 23")
           app.write_text(text)
           PY
 

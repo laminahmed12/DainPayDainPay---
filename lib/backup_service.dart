@@ -103,16 +103,8 @@ class DainPayBackupService {
 
   Future<Map<String, dynamic>> restoreLocal({
     required String localKey,
-    String? legacyKey,
   }) async {
-    try {
-      return await _restoreLocalWithKey(localKey);
-    } catch (_) {
-      if (legacyKey != null && legacyKey.trim().isNotEmpty) {
-        return _restoreLocalWithKey(legacyKey);
-      }
-      rethrow;
-    }
+    return _restoreLocalWithKey(localKey);
   }
 
   Future<Map<String, dynamic>> _restoreLocalWithKey(String localKey) async {
@@ -408,9 +400,7 @@ class DainPayBackupService {
     );
   }
 
-  Future<Map<String, dynamic>> restore({
-    String? legacyKey,
-  }) async {
+  Future<Map<String, dynamic>> restore() async {
     final token = await _accessToken();
     final account = _google.currentUser;
 
@@ -424,17 +414,10 @@ class DainPayBackupService {
     }
 
     final encrypted = await _download(token, fileId);
-    try {
-      return await decrypt(
-        encrypted,
-        driveKeyForAccountId(account.id),
-      );
-    } catch (_) {
-      if (legacyKey != null && legacyKey.trim().isNotEmpty) {
-        return decrypt(encrypted, legacyKey);
-      }
-      rethrow;
-    }
+    return decrypt(
+      encrypted,
+      driveKeyForAccountId(account.id),
+    );
   }
 
   void dispose() => _client.close();

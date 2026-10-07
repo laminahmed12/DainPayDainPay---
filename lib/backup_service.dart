@@ -185,7 +185,7 @@ class DainPayBackupService {
       bits: 256,
     );
     final key = await kdf.deriveKeyFromPassword(
-      password: secret.trim(),
+      password: secret.trim().toUpperCase(),
       nonce: salt,
     );
     return key.extractBytes();
@@ -408,7 +408,9 @@ class DainPayBackupService {
     );
   }
 
-  Future<Map<String, dynamic>> restore() async {
+  Future<Map<String, dynamic>> restore({
+    String? legacyKey,
+  }) async {
     final token = await _accessToken();
     final account = _google.currentUser;
 
@@ -422,10 +424,17 @@ class DainPayBackupService {
     }
 
     final encrypted = await _download(token, fileId);
-    return decrypt(
-      encrypted,
-      driveKeyForAccountId(account.id),
-    );
+    try {
+      return await decrypt(
+        encrypted,
+        driveKeyForAccountId(account.id),
+      );
+    } catch (_) {
+      if (legacyKey != null && legacyKey.trim().isNotEmpty) {
+        return decrypt(encrypted, legacyKey);
+      }
+      rethrow;
+    }
   }
 
   void dispose() => _client.close();

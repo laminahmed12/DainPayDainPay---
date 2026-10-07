@@ -17,10 +17,35 @@ service cloud.firestore {
       }
     }
 
-    // Activation codes are server-managed only. Generation and redemption
-    // happen through authenticated Cloud Functions.
+    // Cloud Functions are the preferred activation path. These narrowly scoped
+    // rules are a compatibility fallback for releases where Functions have not
+    // yet been deployed.
     match /activation_codes/{codeId} {
-      allow read, write: if false;
+      allow create: if signedIn()
+        && codeId.matches('^[0-9]{6}$')
+        && request.resource.data.keys().hasOnly([
+          'used', 'createdAt', 'createdByUid', 'deviceId'
+        ])
+        && request.resource.data.used == false
+        && request.resource.data.createdByUid == request.auth.uid;
+
+      allow get: if signedIn()
+        && resource.data.used == false;
+
+      allow update: if signedIn()
+        && resource.data.used == false
+        && request.resource.data.used == true
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.deviceId == resource.data.deviceId
+        && request.resource.data.usedUid == request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          'used', 'createdAt', 'createdByUid', 'deviceId',
+          'usedAt', 'usedUid', 'usedDeviceId'
+        ]);
+
+      allow delete: if false;
+      allow list: if false;
     }
   }
 }

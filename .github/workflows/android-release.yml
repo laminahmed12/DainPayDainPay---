@@ -132,7 +132,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v83-all-screenshot-fixes-release
+          name: dainpay-v84-all-screenshot-fixes-release
           path: |
             build/app/outputs/flutter-apk/app-release.apk
             release-signing-certificate.txt

@@ -432,6 +432,7 @@ class Store extends ChangeNotifier {
   DateTime? lastBackupAt;
   DateTime? lastLocalBackupAt;
   String backupGoogleEmail = '';
+  final Set<String> pendingDeletedCustomerIds = <String>{};
   final FlutterSecureStorage secureStorage = const FlutterSecureStorage();
 
   bool _disposed = false;
@@ -467,6 +468,8 @@ class Store extends ChangeNotifier {
     store.lastLocalBackupAt =
         lastLocal == null ? null : DateTime.tryParse(lastLocal);
     store.backupGoogleEmail = store.prefs.getString('backup_google_email') ?? '';
+    final pendingDeleted = store.prefs.getStringList('pending_deleted_customers') ?? const <String>[];
+    store.pendingDeletedCustomerIds.addAll(pendingDeleted);
 
     if (store.deviceId.isEmpty) {
       store.deviceId =
@@ -699,6 +702,10 @@ class Store extends ChangeNotifier {
     await _pref(() => prefs.setString('whatsappMessage', whatsappMessage));
     await _pref(() => prefs.setBool('dark', dark));
     await _pref(() => prefs.setBool('activated', activated));
+    await _pref(() => prefs.setStringList(
+          'pending_deleted_customers',
+          pendingDeletedCustomerIds.toList(),
+        ));
 
     // Redundant encrypted local snapshot. This runs on every local save so
     // a damaged SharedPreferences record does not destroy the only copy.
@@ -761,34 +768,58 @@ class Store extends ChangeNotifier {
     if (balance(customer.id) != 0 || prepaidCredit(customer.id) != 0) {
       return false;
     }
-    if (!firebaseReady || uid.isEmpty) return false;
 
-    try {
-      final txSnap = await transactionRef
-          .where('customerId', isEqualTo: customer.id)
-          .get();
-      // The local ledger is the source of truth for the delete gate:
-      // balance == 0 and prepaidCredit == 0 were checked before reaching here.
-      // Remove the complete cloud ledger in one batch so stale/duplicate cloud
-      // entries cannot leave a ghost customer.
-      final batch = FirebaseFirestore.instance.batch();
-      for (final doc in txSnap.docs) {
-        batch.delete(doc.reference);
-      }
-      batch.delete(customerRef.doc(customer.id));
-      await batch.commit();
+    // Local zero balance is the delete gate. Queue the cloud deletion so a
+    // stale/offline Firestore check cannot block a valid deletion.
+    final customerId = customer.id;
+    transactions.removeWhere((tx) => tx.customerId == customerId);
+    customers.removeWhere((item) => item.id == customerId);
+    pendingDeletedCustomerIds.add(customerId);
+    await saveLocal();
+    safeNotify();
 
-      transactions.removeWhere((tx) => tx.customerId == customer.id);
-      customers.removeWhere((item) => item.id == customer.id);
-      await saveLocal();
-      safeNotify();
-      return true;
-    } catch (e) {
-      debugPrint('Delete customer error: $e');
-      return false;
+    if (firebaseReady && uid.isNotEmpty) {
+      await _flushPendingCustomerDeletions();
     }
+    return true;
   }
 
+  Future<bool> _flushPendingCustomerDeletions() async {
+    if (!firebaseReady || uid.isEmpty || pendingDeletedCustomerIds.isEmpty) {
+      return true;
+    }
+
+    var allSucceeded = true;
+    for (final customerId in List<String>.from(pendingDeletedCustomerIds)) {
+      try {
+        final txSnap = await transactionRef
+            .where('customerId', isEqualTo: customerId)
+            .get();
+
+        const chunkSize = 400;
+        for (var start = 0; start < txSnap.docs.length; start += chunkSize) {
+          final end = min(start + chunkSize, txSnap.docs.length);
+          final batch = FirebaseFirestore.instance.batch();
+          for (var i = start; i < end; i++) {
+            batch.delete(txSnap.docs[i].reference);
+          }
+          await batch.commit();
+        }
+
+        await customerRef.doc(customerId).delete();
+        pendingDeletedCustomerIds.remove(customerId);
+      } catch (e) {
+        allSucceeded = false;
+        debugPrint('Pending customer deletion failed [$customerId]: $e');
+      }
+    }
+
+    await _pref(() => prefs.setStringList(
+          'pending_deleted_customers',
+          pendingDeletedCustomerIds.toList(),
+        ));
+    return allSucceeded;
+  }
   Future<void> deleteVoiceDraft(String id) async {
     voiceDrafts.removeWhere((draft) => draft.id == id);
     await saveLocal();
@@ -889,15 +920,22 @@ class Store extends ChangeNotifier {
 
   Future<DainPayBackupResult> restoreFromLocalBackup() async {
     try {
-      final localKey = await ensureLocalBackupKey();
-      final payload = await backupService.restoreLocal(
-        localKey: localKey,
-      );
+      final localKey = localBackupKey.trim().isNotEmpty
+          ? localBackupKey
+          : await secureStorage.read(key: 'dainpay_local_backup_key');
+      if (localKey == null || localKey.trim().isEmpty) {
+        return const DainPayBackupResult(
+          success: false,
+          message: 'مفتاح النسخة المحلية غير موجود. استخدم استعادة Google Drive بالحساب نفسه.',
+        );
+      }
+      final payload = await backupService.restoreLocal(localKey: localKey);
       return _applyBackupPayload(payload);
     } catch (e) {
-      return DainPayBackupResult(
+      debugPrint('Local restore error: $e');
+      return const DainPayBackupResult(
         success: false,
-        message: 'لا توجد نسخة محلية سليمة على هذا الجهاز. إذا كان لديك نسخة Google Drive اختر استعادة من Google Drive.',
+        message: 'تعذر فتح النسخة المحلية. استخدم استعادة Google Drive بالحساب نفسه إذا كانت النسخة السحابية موجودة.',
       );
     }
   }
@@ -1021,6 +1059,8 @@ class Store extends ChangeNotifier {
     safeNotify();
 
     try {
+      await _flushPendingCustomerDeletions();
+
       final firestore = FirebaseFirestore.instance;
       final customerList = List<Customer>.from(customers);
       final transactionList = List<Tx>.from(transactions);
@@ -1120,7 +1160,7 @@ class Store extends ChangeNotifier {
       HttpsCallableResult result;
       try {
         result = await FirebaseFunctions.instanceFor(
-          region: 'europe-west1',
+          region: 'us-central1',
         ).httpsCallable('redeemActivationCode').call({
           'code': clean,
           'deviceId': deviceId,
@@ -1769,21 +1809,16 @@ class CustomerPage extends StatelessWidget {
       );
       return;
     }
-    if (!store.firebaseReady) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'الحذف الآمن يحتاج اتصالاً بالإنترنت للتحقق من الرصيد السحابي.')),
-      );
-      return;
-    }
+    // The local zero-balance ledger is authoritative. Cloud deletion is queued
+    // and retried automatically, so a temporary Firebase problem does not
+    // block the customer from being removed from the local ledger.
 
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('حذف العميل؟'),
         content: const Text(
-            'سيتم حذف العميل وجميع عملياته بعد التحقق من أن الرصيد السحابي يساوي صفرًا.'),
+            'سيتم حذف العميل وعملياته لأن رصيده المحلي صفر. وسيتم مزامنة الحذف مع Firebase تلقائياً.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
@@ -1805,8 +1840,8 @@ class CustomerPage extends StatelessWidget {
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content:
-                Text('تم رفض الحذف: الرصيد السحابي ليس صفراً أو تعذر التحقق.')),
+          content: Text('تم حذف العميل محلياً، وستتم مزامنة الحذف مع Firebase عند توفر الاتصال.'),
+        ),
       );
     }
   }

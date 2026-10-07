@@ -428,7 +428,6 @@ class Store extends ChangeNotifier {
   bool isAdmin = false;
 
   final DainPayBackupService backupService = DainPayBackupService();
-  String legacyBackupRecoveryCode = '';
   String localBackupKey = '';
   DateTime? lastBackupAt;
   DateTime? lastLocalBackupAt;
@@ -459,19 +458,6 @@ class Store extends ChangeNotifier {
           key: 'dainpay_local_backup_key',
           value: store.localBackupKey,
         );
-      }
-    }
-    store.legacyBackupRecoveryCode =
-        await store.secureStorage.read(key: 'dainpay_backup_recovery') ?? '';
-    if (store.legacyBackupRecoveryCode.isEmpty) {
-      final legacyRecovery = store.prefs.getString('backup_recovery_code');
-      if (legacyRecovery != null && legacyRecovery.isNotEmpty) {
-        store.legacyBackupRecoveryCode = legacyRecovery;
-        await store.secureStorage.write(
-          key: 'dainpay_backup_recovery',
-          value: legacyRecovery,
-        );
-        await store.prefs.remove('backup_recovery_code');
       }
     }
     final lastBackup = store.prefs.getString('last_backup_at');
@@ -714,8 +700,6 @@ class Store extends ChangeNotifier {
     await _pref(() => prefs.setBool('dark', dark));
     await _pref(() => prefs.setBool('activated', activated));
 
-    // Redundant encrypted local snapshot. This runs on every local save so
-    // a damaged SharedPreferences record does not destroy the only copy.
     try {
       final localKey = await ensureLocalBackupKey();
       final ok = await backupService.saveLocal(
@@ -723,6 +707,19 @@ class Store extends ChangeNotifier {
         localKey: localKey,
       );
       if (ok) {
+        try {
+          final envelope = await backupService.encrypt(
+            backupPayload(),
+            localKey,
+          );
+          await _pref(() => prefs.setString(
+                'dainpay_local_backup_envelope',
+                envelope,
+              ));
+        } catch (e) {
+          debugPrint('Encrypted emergency local copy failed: $e');
+        }
+
         lastLocalBackupAt = DateTime.now();
         await _pref(() => prefs.setString(
               'last_local_backup_at',
@@ -780,7 +777,8 @@ class Store extends ChangeNotifier {
     try {
       final txSnap = await transactionRef
           .where('customerId', isEqualTo: customer.id)
-          .get();
+          .get(const GetOptions(source: Source.server));
+
       var cloudNet = 0;
       for (final doc in txSnap.docs) {
         final data = doc.data();
@@ -797,8 +795,7 @@ class Store extends ChangeNotifier {
           cloudNet -= amount;
         }
       }
-      // A customer is deletable only when the cloud ledger is exactly settled:
-      // no outstanding debt and no prepaid credit.
+
       if (cloudNet != 0) return false;
 
       final batch = FirebaseFirestore.instance.batch();
@@ -849,7 +846,7 @@ class Store extends ChangeNotifier {
 
   Map<String, dynamic> backupPayload() {
     return {
-      'schema': 1,
+      'schema': 4,
       'app': 'DainPay',
       'shop': shop,
       'whatsappMessage': whatsappMessage,
@@ -899,7 +896,6 @@ class Store extends ChangeNotifier {
   Future<DainPayBackupResult> restoreFromGoogleDrive() async {
     try {
       final payload = await backupService.restore(
-        legacyKey: legacyBackupRecoveryCode,
       );
       final result = await _applyBackupPayload(payload);
       if (result.success) {
@@ -920,17 +916,28 @@ class Store extends ChangeNotifier {
   }
 
   Future<DainPayBackupResult> restoreFromLocalBackup() async {
+    final localKey = await ensureLocalBackupKey();
+
     try {
-      final localKey = await ensureLocalBackupKey();
       final payload = await backupService.restoreLocal(
         localKey: localKey,
-        legacyKey: legacyBackupRecoveryCode,
       );
       return _applyBackupPayload(payload);
-    } catch (e) {
+    } catch (fileError) {
+      try {
+        final envelope =
+            prefs.getString('dainpay_local_backup_envelope') ?? '';
+        if (envelope.trim().isNotEmpty) {
+          final payload = await backupService.decrypt(envelope, localKey);
+          return _applyBackupPayload(payload);
+        }
+      } catch (emergencyError) {
+        debugPrint('Emergency local restore failed: $emergencyError');
+      }
+
       return DainPayBackupResult(
         success: false,
-        message: 'تعذر استعادة النسخة المحلية: $e',
+        message: 'لا توجد نسخة محلية سليمة يمكن استعادتها. الخطأ: $fileError',
       );
     }
   }
@@ -939,7 +946,7 @@ class Store extends ChangeNotifier {
       Map<String, dynamic> payload) async {
     if ((payload['schema'] != 1 &&
             payload['schema'] != 2 &&
-            payload['schema'] != 3) ||
+            payload['schema'] != 4) ||
         payload['app'] != 'DainPay') {
       return const DainPayBackupResult(
         success: false,
@@ -1147,7 +1154,7 @@ class Store extends ChangeNotifier {
     if (!firebaseReady || uid.isEmpty) return false;
 
     final clean = _digits(code).trim();
-    if (clean.isEmpty) return false;
+    if (!RegExp(r'^\d{6}$').hasMatch(clean)) return false;
 
     try {
       HttpsCallableResult result;
@@ -1160,13 +1167,19 @@ class Store extends ChangeNotifier {
         });
       } on FirebaseFunctionsException catch (e) {
         if (e.code != 'not-found') rethrow;
-        result = await FirebaseFunctions.instanceFor(
-          region: 'us-central1',
-        ).httpsCallable('redeemActivationCode').call({
-          'code': clean,
-          'deviceId': deviceId,
-        });
+        try {
+          result = await FirebaseFunctions.instanceFor(
+            region: 'us-central1',
+          ).httpsCallable('redeemActivationCode').call({
+            'code': clean,
+            'deviceId': deviceId,
+          });
+        } on FirebaseFunctionsException catch (usError) {
+          if (usError.code != 'not-found') rethrow;
+          return _redeemActivationCodeDirect(clean);
+        }
       }
+
       final data = result.data;
       final success = data is Map && data['success'] == true;
       if (!success) return false;
@@ -1177,9 +1190,48 @@ class Store extends ChangeNotifier {
       return true;
     } on FirebaseFunctionsException catch (e) {
       debugPrint('Activation function error: ${e.code}: ${e.message}');
+      if (e.code == 'not-found') return _redeemActivationCodeDirect(clean);
       return false;
     } catch (e) {
       debugPrint('Activation error: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _redeemActivationCodeDirect(String clean) async {
+    try {
+      final ref = activationCodesRef.doc(clean);
+      final accepted = await FirebaseFirestore.instance.runTransaction<bool>(
+        (tx) async {
+          final snap = await tx.get(ref);
+          if (!snap.exists) return false;
+          final data = snap.data() ?? <String, dynamic>{};
+          if (data['used'] == true) return false;
+
+          tx.update(ref, {
+            'used': true,
+            'usedAt': FieldValue.serverTimestamp(),
+            'usedUid': uid,
+            'usedDeviceId': deviceId,
+          });
+          return true;
+        },
+      );
+
+      if (!accepted) return false;
+
+      await userRef.doc(uid).set({
+        'activated': true,
+        'activatedAt': FieldValue.serverTimestamp(),
+        'activatedDeviceId': deviceId,
+      }, SetOptions(merge: true));
+
+      activated = true;
+      await saveLocal();
+      safeNotify();
+      return true;
+    } catch (e) {
+      debugPrint('Direct activation fallback error: $e');
       return false;
     }
   }
@@ -1198,13 +1250,19 @@ class Store extends ChangeNotifier {
         });
       } on FirebaseFunctionsException catch (e) {
         if (e.code != 'not-found') rethrow;
-        result = await FirebaseFunctions.instanceFor(
-          region: 'us-central1',
-        ).httpsCallable('generateActivationCode').call({
-          'adminPin': adminPin,
-          'deviceId': deviceId,
-        });
+        try {
+          result = await FirebaseFunctions.instanceFor(
+            region: 'us-central1',
+          ).httpsCallable('generateActivationCode').call({
+            'adminPin': adminPin,
+            'deviceId': deviceId,
+          });
+        } on FirebaseFunctionsException catch (usError) {
+          if (usError.code != 'not-found') rethrow;
+          return _generateActivationCodeDirect();
+        }
       }
+
       final data = result.data;
       if (data is Map && data['code'] is String) {
         return data['code'] as String;
@@ -1212,16 +1270,35 @@ class Store extends ChangeNotifier {
       return null;
     } on FirebaseFunctionsException catch (e) {
       debugPrint('Generate activation function error: ${e.code}: ${e.message}');
-      if (e.code == 'not-found') {
-        throw StateError(
-          'خدمة التفعيل غير منشورة على Firebase بعد. يلزم نشر Cloud Functions للمشروع.',
-        );
-      }
+      if (e.code == 'not-found') return _generateActivationCodeDirect();
       rethrow;
     } catch (e) {
       debugPrint('Generate activation code error: $e');
       rethrow;
     }
+  }
+
+  Future<String?> _generateActivationCodeDirect() async {
+    if (!isAdmin || !firebaseReady || uid.isEmpty) return null;
+
+    for (var attempt = 0; attempt < 30; attempt++) {
+      final code = (100000 + Random.secure().nextInt(900000)).toString();
+      final ref = activationCodesRef.doc(code);
+      try {
+        await ref.create({
+          'used': false,
+          'createdAt': FieldValue.serverTimestamp(),
+          'createdByUid': uid,
+          'deviceId': deviceId,
+        });
+        return code;
+      } on FirebaseException catch (e) {
+        if (e.code == 'already-exists') continue;
+        rethrow;
+      }
+    }
+
+    throw StateError('تعذر إنشاء رمز تفعيل فريد حالياً.');
   }
 
   bool checkAdminLocal(String pin) {
@@ -2750,7 +2827,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     );
                   },
                   icon: const Icon(Icons.phone_android_rounded),
-                  label: const Text('استعادة من النسخة المحلية'),
+                  label: const Text('استعادة من النسخة المحلية المشفرة'),
                 ),
                 OutlinedButton.icon(
                   onPressed: () async {
@@ -3022,7 +3099,7 @@ class _AdminPageState extends State<AdminPage> {
               leading: Icon(Icons.vpn_key_rounded),
               title: Text('رمز دائم لمرة واحدة'),
               subtitle:
-                  Text('الرمز غير مرتبط بالهاتف ويمكن استخدامه مرة واحدة فقط.'),
+                  Text('رمز دائم لمرة واحدة فقط؛ لا يمكن استخدامه بعد استهلاكه.'),
             ),
           ),
           FilledButton(

@@ -40,6 +40,11 @@ Future<void> main() async {
   }
 
   await store.connectFirebase();
+  try {
+    await store.saveLocal();
+  } catch (e) {
+    debugPrint('Initial local backup error: $e');
+  }
   runApp(DainPayApp(store: store));
 }
 
@@ -426,6 +431,7 @@ class Store extends ChangeNotifier {
   bool activated = false;
   bool dark = false;
   bool isAdmin = false;
+  String lastDeleteError = '';
 
   final DainPayBackupService backupService = DainPayBackupService();
   String localBackupKey = '';
@@ -648,47 +654,9 @@ class Store extends ChangeNotifier {
   Future<void> loadActivation() => loadAccountState();
 
   Future<void> pullCloud() async {
-    if (!firebaseReady || uid.isEmpty) return;
-
-    try {
-      final customerDocs = await customerRef.get();
-      final txDocs = await transactionRef.get();
-
-      for (final doc in customerDocs.docs) {
-        final data = Map<String, dynamic>.from(doc.data());
-        data['id'] ??= doc.id;
-        final item = Customer.fromJson(data);
-        final index = customers.indexWhere((c) => c.id == item.id);
-        if (index == -1) {
-          customers.add(item);
-        } else {
-          customers[index] = item;
-        }
-      }
-
-      for (final doc in txDocs.docs) {
-        final data = Map<String, dynamic>.from(doc.data());
-        data['id'] ??= doc.id;
-
-        final rawDate = data['date'];
-        if (rawDate is Timestamp) {
-          data['date'] = rawDate.toDate().toIso8601String();
-        }
-
-        final item = Tx.fromJson(data);
-        final index = transactions.indexWhere((t) => t.id == item.id);
-        if (index == -1) {
-          transactions.add(item);
-        } else {
-          transactions[index] = item;
-        }
-      }
-
-      await saveLocal();
-      safeNotify();
-    } catch (e) {
-      debugPrint('Cloud pull error: $e');
-    }
+    // Customer and transaction data are local-first. Google Drive is the
+    // encrypted backup/restore layer; Firestore is not used for customer data.
+    return;
   }
 
   Future<void> saveLocal() async {
@@ -728,9 +696,10 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> save() async {
+    // Primary customer/transaction store: local device.
+    // Google Drive is the encrypted backup layer.
     await saveLocal();
     safeNotify();
-    await syncAll();
   }
 
   Future<bool> saveCustomer(Customer customer) async {
@@ -765,61 +734,29 @@ class Store extends ChangeNotifier {
   }
 
   Future<bool> deleteCustomer(Customer customer) async {
-    if (balance(customer.id) != 0 || prepaidCredit(customer.id) != 0) {
+    lastDeleteError = '';
+    final currentBalance = balance(customer.id);
+    final credit = prepaidCredit(customer.id);
+
+    if (currentBalance != 0) {
+      lastDeleteError = 'لا يمكن الحذف: المتبقي على العميل ' +
+          money(currentBalance) + '.';
+      return false;
+    }
+    if (credit != 0) {
+      lastDeleteError = 'لا يمكن الحذف: للعميل رصيد مسبق ' +
+          money(credit) + '.';
       return false;
     }
 
-    // Local zero balance is the delete gate. Queue the cloud deletion so a
-    // stale/offline Firestore check cannot block a valid deletion.
-    final customerId = customer.id;
-    transactions.removeWhere((tx) => tx.customerId == customerId);
-    customers.removeWhere((item) => item.id == customerId);
-    pendingDeletedCustomerIds.add(customerId);
+    transactions.removeWhere((tx) => tx.customerId == customer.id);
+    customers.removeWhere((item) => item.id == customer.id);
+    pendingDeletedCustomerIds.remove(customer.id);
     await saveLocal();
     safeNotify();
-
-    if (firebaseReady && uid.isNotEmpty) {
-      await _flushPendingCustomerDeletions();
-    }
     return true;
   }
 
-  Future<bool> _flushPendingCustomerDeletions() async {
-    if (!firebaseReady || uid.isEmpty || pendingDeletedCustomerIds.isEmpty) {
-      return true;
-    }
-
-    var allSucceeded = true;
-    for (final customerId in List<String>.from(pendingDeletedCustomerIds)) {
-      try {
-        final txSnap = await transactionRef
-            .where('customerId', isEqualTo: customerId)
-            .get();
-
-        const chunkSize = 400;
-        for (var start = 0; start < txSnap.docs.length; start += chunkSize) {
-          final end = min(start + chunkSize, txSnap.docs.length);
-          final batch = FirebaseFirestore.instance.batch();
-          for (var i = start; i < end; i++) {
-            batch.delete(txSnap.docs[i].reference);
-          }
-          await batch.commit();
-        }
-
-        await customerRef.doc(customerId).delete();
-        pendingDeletedCustomerIds.remove(customerId);
-      } catch (e) {
-        allSucceeded = false;
-        debugPrint('Pending customer deletion failed [$customerId]: $e');
-      }
-    }
-
-    await _pref(() => prefs.setStringList(
-          'pending_deleted_customers',
-          pendingDeletedCustomerIds.toList(),
-        ));
-    return allSucceeded;
-  }
   Future<void> deleteVoiceDraft(String id) async {
     voiceDrafts.removeWhere((draft) => draft.id == id);
     await saveLocal();
@@ -1028,79 +965,8 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> syncAll() async {
-    if (!firebaseReady || uid.isEmpty) return;
-
-    final running = _syncFuture;
-    if (running != null) {
-      _syncQueued = true;
-      await running;
-      return;
-    }
-
-    final future = _performSync();
-    _syncFuture = future;
-
-    try {
-      await future;
-    } finally {
-      if (identical(_syncFuture, future)) {
-        _syncFuture = null;
-      }
-    }
-
-    if (_syncQueued) {
-      _syncQueued = false;
-      await syncAll();
-    }
-  }
-
-  Future<void> _performSync() async {
-    syncing = true;
-    safeNotify();
-
-    try {
-      await _flushPendingCustomerDeletions();
-
-      final firestore = FirebaseFirestore.instance;
-      final customerList = List<Customer>.from(customers);
-      final transactionList = List<Tx>.from(transactions);
-      final operations = <void Function(WriteBatch)>[];
-
-      for (final customer in customerList) {
-        operations.add((batch) {
-          batch.set(customerRef.doc(customer.id), customer.toJson(),
-              SetOptions(merge: true));
-        });
-      }
-
-      for (final transaction in transactionList) {
-        operations.add((batch) {
-          batch.set(
-            transactionRef.doc(transaction.id),
-            {
-              ...transaction.toJson(),
-              'date': Timestamp.fromDate(transaction.date),
-            },
-            SetOptions(merge: true),
-          );
-        });
-      }
-
-      const chunkSize = 450;
-      for (var start = 0; start < operations.length; start += chunkSize) {
-        final end = min(start + chunkSize, operations.length);
-        final batch = firestore.batch();
-        for (var i = start; i < end; i++) {
-          operations[i](batch);
-        }
-        await batch.commit();
-      }
-    } catch (e) {
-      debugPrint('Cloud sync error: $e');
-    } finally {
-      syncing = false;
-      safeNotify();
-    }
+    // Customer/transaction cloud synchronization is intentionally disabled.
+    return;
   }
 
   int balance(String customerId) {
@@ -1153,14 +1019,14 @@ class Store extends ChangeNotifier {
   Future<bool> activateCode(String code) async {
     if (!firebaseReady || uid.isEmpty) return false;
 
-    final clean = _digits(code).trim();
-    if (clean.isEmpty) return false;
+    final clean = _digits(code).replaceAll(RegExp(r'\D'), '');
+    if (!RegExp(r'^\d{6}$').hasMatch(clean)) return false;
 
     try {
       HttpsCallableResult result;
       try {
         result = await FirebaseFunctions.instanceFor(
-          region: 'us-central1',
+          region: 'europe-west1',
         ).httpsCallable('redeemActivationCode').call({
           'code': clean,
           'deviceId': deviceId,
@@ -1174,19 +1040,58 @@ class Store extends ChangeNotifier {
           'deviceId': deviceId,
         });
       }
-      final data = result.data;
-      final success = data is Map && data['success'] == true;
-      if (!success) return false;
 
-      activated = true;
-      await saveLocal();
-      safeNotify();
-      return true;
-    } on FirebaseFunctionsException catch (e) {
-      debugPrint('Activation function error: ${e.code}: ${e.message}');
+      final data = result.data;
+      if (data is Map && data['success'] == true) {
+        activated = true;
+        await saveLocal();
+        safeNotify();
+        return true;
+      }
       return false;
+    } on FirebaseFunctionsException catch (e) {
+      if (e.code != 'not-found') {
+        debugPrint('Activation function error: ' + e.code + ': ' + (e.message ?? ''));
+        return false;
+      }
+
+      // Compatibility with the currently deployed legacy Firestore rules.
+      try {
+        final ref = activationCodesRef.doc(clean);
+        final valid = await FirebaseFirestore.instance.runTransaction<bool>(
+          (tx) async {
+            final snap = await tx.get(ref);
+            if (!snap.exists) return false;
+            final data = snap.data() ?? <String, dynamic>{};
+            if (data['used'] == true) return false;
+            tx.update(ref, {
+              'used': true,
+              'usedAt': Timestamp.now(),
+              'usedUid': uid,
+              'usedDeviceId': deviceId,
+            });
+            return true;
+          },
+        );
+
+        if (!valid) return false;
+
+        await userRef.doc(uid).set({
+          'activated': true,
+          'activatedAt': Timestamp.now(),
+          'activatedDeviceId': deviceId,
+        }, SetOptions(merge: true));
+
+        activated = true;
+        await saveLocal();
+        safeNotify();
+        return true;
+      } catch (fallbackError) {
+        debugPrint('Legacy activation fallback error: ' + fallbackError.toString());
+        return false;
+      }
     } catch (e) {
-      debugPrint('Activation error: $e');
+      debugPrint('Activation error: ' + e.toString());
       return false;
     }
   }
@@ -1212,26 +1117,59 @@ class Store extends ChangeNotifier {
           'deviceId': deviceId,
         });
       }
+
       final data = result.data;
       if (data is Map && data['code'] is String) {
         return data['code'] as String;
       }
-      return null;
+      throw StateError('استجابة غير صالحة من خدمة التفعيل.');
     } on FirebaseFunctionsException catch (e) {
-      debugPrint('Generate activation function error: ${e.code}: ${e.message}');
-      if (e.code == 'not-found') {
+      if (e.code != 'not-found') {
         throw StateError(
-          'خدمة التفعيل غير منشورة على Firebase بعد. يلزم نشر Cloud Functions للمشروع.',
+          'تعذر توليد رمز التفعيل: ' + (e.message ?? e.code),
         );
       }
-      rethrow;
+
+      // Compatibility with the currently deployed legacy Firestore rules.
+      try {
+        for (var attempt = 0; attempt < 20; attempt++) {
+          final code =
+              (100000 + Random.secure().nextInt(900000)).toString();
+          final ref = activationCodesRef.doc(code);
+
+          final created =
+              await FirebaseFirestore.instance.runTransaction<bool>(
+            (tx) async {
+              final snap = await tx.get(ref);
+              if (snap.exists) return false;
+
+              tx.set(ref, {
+                'used': false,
+                'createdAt': Timestamp.now(),
+                'createdByUid': uid,
+                'deviceId': deviceId,
+              });
+              return true;
+            },
+          );
+
+          if (created) return code;
+        }
+
+        throw StateError('تعذر إنشاء رمز فريد حالياً.');
+      } on FirebaseException catch (fallbackError) {
+        throw StateError(
+          'تعذر إنشاء رمز التفعيل عبر Firebase: ' +
+              (fallbackError.message ?? fallbackError.code),
+        );
+      }
     } catch (e) {
-      debugPrint('Generate activation code error: $e');
+      debugPrint('Generate activation code error: ' + e.toString());
       rethrow;
     }
   }
 
-  bool checkAdminLocal(String pin) {
+  bool checkAdminLocal  bool checkAdminLocal(String pin) {
     final valid = _digits(pin).trim() == adminPin;
     isAdmin = valid;
     safeNotify();
@@ -1371,7 +1309,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> refresh() async {
-    await widget.store.pullCloud();
+    await widget.store.saveLocal();
     if (mounted) setState(() {});
   }
 
@@ -1456,7 +1394,7 @@ class _HomePageState extends State<HomePage> {
                   leading: const Icon(Icons.cloud_off, color: burgundy),
                   title: const Text('Firebase غير متصل'),
                   subtitle: const Text(
-                      'البيانات المحلية ما زالت تعمل، وستتم المزامنة عند توفر الخدمة.'),
+                      'بيانات العملاء محفوظة محلياً. Firebase يُستخدم لحالة الحساب والتفعيل.'),
                   trailing: IconButton(
                     onPressed: store.connectFirebase,
                     icon: const Icon(Icons.refresh),

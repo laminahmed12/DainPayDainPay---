@@ -946,6 +946,7 @@ class Store extends ChangeNotifier {
       Map<String, dynamic> payload) async {
     if ((payload['schema'] != 1 &&
             payload['schema'] != 2 &&
+            payload['schema'] != 3 &&
             payload['schema'] != 4) ||
         payload['app'] != 'DainPay') {
       return const DainPayBackupResult(

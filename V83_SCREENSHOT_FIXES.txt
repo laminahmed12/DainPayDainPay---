@@ -1,0 +1,1 @@
+DainPay 1.6.3+17 screenshot fixes: account-only backup recovery, prepaid overpayment, customer deletion, clearer activation errors.

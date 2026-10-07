@@ -4,7 +4,7 @@ const admin=require("firebase-admin");
 const crypto=require("crypto");
 
 admin.initializeApp();
-setGlobalOptions({region:"us-central1",maxInstances:5});
+setGlobalOptions({region:"us-central1",maxInstances:5,invoker:"public"});
 
 const db=admin.firestore();
 

@@ -428,7 +428,6 @@ class Store extends ChangeNotifier {
   bool isAdmin = false;
 
   final DainPayBackupService backupService = DainPayBackupService();
-  String legacyBackupRecoveryCode = '';
   String localBackupKey = '';
   DateTime? lastBackupAt;
   DateTime? lastLocalBackupAt;
@@ -459,19 +458,6 @@ class Store extends ChangeNotifier {
           key: 'dainpay_local_backup_key',
           value: store.localBackupKey,
         );
-      }
-    }
-    store.legacyBackupRecoveryCode =
-        await store.secureStorage.read(key: 'dainpay_backup_recovery') ?? '';
-    if (store.legacyBackupRecoveryCode.isEmpty) {
-      final legacyRecovery = store.prefs.getString('backup_recovery_code');
-      if (legacyRecovery != null && legacyRecovery.isNotEmpty) {
-        store.legacyBackupRecoveryCode = legacyRecovery;
-        await store.secureStorage.write(
-          key: 'dainpay_backup_recovery',
-          value: legacyRecovery,
-        );
-        await store.prefs.remove('backup_recovery_code');
       }
     }
     final lastBackup = store.prefs.getString('last_backup_at');
@@ -781,26 +767,10 @@ class Store extends ChangeNotifier {
       final txSnap = await transactionRef
           .where('customerId', isEqualTo: customer.id)
           .get();
-      var cloudNet = 0;
-      for (final doc in txSnap.docs) {
-        final data = doc.data();
-        final type = '${data['type'] ?? ''}';
-        final raw = data['amountCents'];
-        final amount = raw is num
-            ? raw.toInt()
-            : data['amount'] is num
-                ? ((data['amount'] as num).toDouble() * 100).round()
-                : 0;
-        if (type == 'debt') {
-          cloudNet += amount;
-        } else if (type == 'payment') {
-          cloudNet -= amount;
-        }
-      }
-      // A customer is deletable only when the cloud ledger is exactly settled:
-      // no outstanding debt and no prepaid credit.
-      if (cloudNet != 0) return false;
-
+      // The local ledger is the source of truth for the delete gate:
+      // balance == 0 and prepaidCredit == 0 were checked before reaching here.
+      // Remove the complete cloud ledger in one batch so stale/duplicate cloud
+      // entries cannot leave a ghost customer.
       final batch = FirebaseFirestore.instance.batch();
       for (final doc in txSnap.docs) {
         batch.delete(doc.reference);
@@ -898,9 +868,7 @@ class Store extends ChangeNotifier {
 
   Future<DainPayBackupResult> restoreFromGoogleDrive() async {
     try {
-      final payload = await backupService.restore(
-        legacyKey: legacyBackupRecoveryCode,
-      );
+      final payload = await backupService.restore();
       final result = await _applyBackupPayload(payload);
       if (result.success) {
         backupGoogleEmail =
@@ -924,13 +892,12 @@ class Store extends ChangeNotifier {
       final localKey = await ensureLocalBackupKey();
       final payload = await backupService.restoreLocal(
         localKey: localKey,
-        legacyKey: legacyBackupRecoveryCode,
       );
       return _applyBackupPayload(payload);
     } catch (e) {
       return DainPayBackupResult(
         success: false,
-        message: 'تعذر استعادة النسخة المحلية: $e',
+        message: 'لا توجد نسخة محلية سليمة على هذا الجهاز. إذا كان لديك نسخة Google Drive اختر استعادة من Google Drive.',
       );
     }
   }
@@ -2137,6 +2104,16 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
     setState(() => busy = false);
 
     if (saved) {
+      if (type == 'payment' && cents > current) {
+        final credit = cents - current;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'تم تسجيل التسديد. الزيادة \${money(credit)} أصبحت رصيداً مسبقاً للعميل.',
+            ),
+          ),
+        );
+      }
       Navigator.pop(context);
     }
   }

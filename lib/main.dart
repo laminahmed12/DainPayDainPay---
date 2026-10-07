@@ -227,7 +227,11 @@ String buildAccountStatement(Store store, Customer customer) {
     'إجمالي الديون: ${money(debt)}',
     'إجمالي المسدد: ${money(paid)}',
     'المتبقي: ${money(balance)}',
-    'الحالة: ${balance <= 0 ? 'مسدد' : 'عليه رصيد'}',
+    if (store.prepaidCredit(customer.id) > 0)
+      'الرصيد المسبق: ${money(store.prepaidCredit(customer.id))}',
+    'الحالة: ${balance <= 0
+        ? (store.prepaidCredit(customer.id) > 0 ? 'له رصيد مسبق' : 'مسدد')
+        : 'عليه رصيد'}',
     '',
     'تفاصيل العمليات:',
   ];
@@ -447,6 +451,16 @@ class Store extends ChangeNotifier {
     store.deviceId = store.prefs.getString('device_id') ?? '';
     store.localBackupKey =
         await store.secureStorage.read(key: 'dainpay_local_backup_key') ?? '';
+    if (store.localBackupKey.isEmpty) {
+      store.localBackupKey =
+          store.prefs.getString('dainpay_local_backup_key') ?? '';
+      if (store.localBackupKey.isNotEmpty) {
+        await store.secureStorage.write(
+          key: 'dainpay_local_backup_key',
+          value: store.localBackupKey,
+        );
+      }
+    }
     store.legacyBackupRecoveryCode =
         await store.secureStorage.read(key: 'dainpay_backup_recovery') ?? '';
     if (store.legacyBackupRecoveryCode.isEmpty) {
@@ -767,8 +781,7 @@ class Store extends ChangeNotifier {
       final txSnap = await transactionRef
           .where('customerId', isEqualTo: customer.id)
           .get();
-      var cloudDebt = 0;
-      var cloudPaid = 0;
+      var cloudNet = 0;
       for (final doc in txSnap.docs) {
         final data = doc.data();
         final type = '${data['type'] ?? ''}';
@@ -779,14 +792,14 @@ class Store extends ChangeNotifier {
                 ? ((data['amount'] as num).toDouble() * 100).round()
                 : 0;
         if (type == 'debt') {
-          cloudDebt += amount;
+          cloudNet += amount;
         } else if (type == 'payment') {
-          cloudPaid += amount;
+          cloudNet -= amount;
         }
       }
-      final cloudBalance = max(0, cloudDebt - cloudPaid);
-      final cloudCredit = max(0, cloudPaid - cloudDebt);
-      if (cloudBalance != 0 || cloudCredit != 0) return false;
+      // A customer is deletable only when the cloud ledger is exactly settled:
+      // no outstanding debt and no prepaid credit.
+      if (cloudNet != 0) return false;
 
       final batch = FirebaseFirestore.instance.batch();
       for (final doc in txSnap.docs) {
@@ -814,6 +827,10 @@ class Store extends ChangeNotifier {
 
   Future<String> ensureLocalBackupKey() async {
     if (localBackupKey.trim().isEmpty) {
+      localBackupKey =
+          prefs.getString('dainpay_local_backup_key') ?? '';
+    }
+    if (localBackupKey.trim().isEmpty) {
       final bytes = List<int>.generate(
         32,
         (_) => Random.secure().nextInt(256),
@@ -822,6 +839,9 @@ class Store extends ChangeNotifier {
       await secureStorage.write(
         key: 'dainpay_local_backup_key',
         value: localBackupKey,
+      );
+      await _pref(
+        () => prefs.setString('dainpay_local_backup_key', localBackupKey),
       );
     }
     return localBackupKey;
@@ -908,7 +928,9 @@ class Store extends ChangeNotifier {
 
   Future<DainPayBackupResult> _applyBackupPayload(
       Map<String, dynamic> payload) async {
-    if (payload['schema'] != 1 && payload['schema'] != 2 ||
+    if ((payload['schema'] != 1 &&
+            payload['schema'] != 2 &&
+            payload['schema'] != 3) ||
         payload['app'] != 'DainPay') {
       return const DainPayBackupResult(
         success: false,
@@ -1119,13 +1141,23 @@ class Store extends ChangeNotifier {
     if (clean.isEmpty) return false;
 
     try {
-      final callable = FirebaseFunctions.instanceFor(
-        region: 'europe-west1',
-      ).httpsCallable('redeemActivationCode');
-      final result = await callable.call({
-        'code': clean,
-        'deviceId': deviceId,
-      });
+      HttpsCallableResult result;
+      try {
+        result = await FirebaseFunctions.instanceFor(
+          region: 'europe-west1',
+        ).httpsCallable('redeemActivationCode').call({
+          'code': clean,
+          'deviceId': deviceId,
+        });
+      } on FirebaseFunctionsException catch (e) {
+        if (e.code != 'not-found') rethrow;
+        result = await FirebaseFunctions.instanceFor(
+          region: 'us-central1',
+        ).httpsCallable('redeemActivationCode').call({
+          'code': clean,
+          'deviceId': deviceId,
+        });
+      }
       final data = result.data;
       final success = data is Map && data['success'] == true;
       if (!success) return false;
@@ -1147,13 +1179,23 @@ class Store extends ChangeNotifier {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
 
     try {
-      final callable = FirebaseFunctions.instanceFor(
-        region: 'europe-west1',
-      ).httpsCallable('generateActivationCode');
-      final result = await callable.call({
-        'adminPin': adminPin,
-        'deviceId': deviceId,
-      });
+      HttpsCallableResult result;
+      try {
+        result = await FirebaseFunctions.instanceFor(
+          region: 'europe-west1',
+        ).httpsCallable('generateActivationCode').call({
+          'adminPin': adminPin,
+          'deviceId': deviceId,
+        });
+      } on FirebaseFunctionsException catch (e) {
+        if (e.code != 'not-found') rethrow;
+        result = await FirebaseFunctions.instanceFor(
+          region: 'us-central1',
+        ).httpsCallable('generateActivationCode').call({
+          'adminPin': adminPin,
+          'deviceId': deviceId,
+        });
+      }
       final data = result.data;
       if (data is Map && data['code'] is String) {
         return data['code'] as String;
@@ -1161,6 +1203,11 @@ class Store extends ChangeNotifier {
       return null;
     } on FirebaseFunctionsException catch (e) {
       debugPrint('Generate activation function error: ${e.code}: ${e.message}');
+      if (e.code == 'not-found') {
+        throw StateError(
+          'خدمة التفعيل غير منشورة على Firebase بعد. يلزم نشر Cloud Functions للمشروع.',
+        );
+      }
       rethrow;
     } catch (e) {
       debugPrint('Generate activation code error: $e');

@@ -1,2 +1,3 @@
 DainPay 1.6.3+17 screenshot fixes: account-only backup recovery, prepaid overpayment, customer deletion, clearer activation errors.
 Workflow Kotlin DSL fix applied: 2026-10-07T05:04Z
+Analyze fix: CardThemeData.

@@ -424,7 +424,8 @@ class Store extends ChangeNotifier {
   bool isAdmin = false;
 
   final DainPayBackupService backupService = DainPayBackupService();
-  String backupRecoveryCode = '';
+  String legacyBackupRecoveryCode = '';
+  String localBackupKey = '';
   DateTime? lastBackupAt;
   DateTime? lastLocalBackupAt;
   String backupGoogleEmail = '';
@@ -444,12 +445,14 @@ class Store extends ChangeNotifier {
     store.dark = store.prefs.getBool('dark') ?? false;
     store.activated = store.prefs.getBool('activated') ?? false;
     store.deviceId = store.prefs.getString('device_id') ?? '';
-    store.backupRecoveryCode =
+    store.localBackupKey =
+        await store.secureStorage.read(key: 'dainpay_local_backup_key') ?? '';
+    store.legacyBackupRecoveryCode =
         await store.secureStorage.read(key: 'dainpay_backup_recovery') ?? '';
-    if (store.backupRecoveryCode.isEmpty) {
+    if (store.legacyBackupRecoveryCode.isEmpty) {
       final legacyRecovery = store.prefs.getString('backup_recovery_code');
       if (legacyRecovery != null && legacyRecovery.isNotEmpty) {
-        store.backupRecoveryCode = legacyRecovery;
+        store.legacyBackupRecoveryCode = legacyRecovery;
         await store.secureStorage.write(
           key: 'dainpay_backup_recovery',
           value: legacyRecovery,
@@ -700,10 +703,10 @@ class Store extends ChangeNotifier {
     // Redundant encrypted local snapshot. This runs on every local save so
     // a damaged SharedPreferences record does not destroy the only copy.
     try {
-      final recovery = await ensureBackupRecoveryCode();
+      final localKey = await ensureLocalBackupKey();
       final ok = await backupService.saveLocal(
         payload: backupPayload(),
-        recoveryCode: recovery,
+        localKey: localKey,
       );
       if (ok) {
         lastLocalBackupAt = DateTime.now();
@@ -755,14 +758,17 @@ class Store extends ChangeNotifier {
   }
 
   Future<bool> deleteCustomer(Customer customer) async {
-    if (balance(customer.id) != 0) return false;
+    if (balance(customer.id) != 0 || prepaidCredit(customer.id) != 0) {
+      return false;
+    }
     if (!firebaseReady || uid.isEmpty) return false;
 
     try {
       final txSnap = await transactionRef
           .where('customerId', isEqualTo: customer.id)
           .get();
-      var cloudBalance = 0;
+      var cloudDebt = 0;
+      var cloudPaid = 0;
       for (final doc in txSnap.docs) {
         final data = doc.data();
         final type = '${data['type'] ?? ''}';
@@ -772,9 +778,15 @@ class Store extends ChangeNotifier {
             : data['amount'] is num
                 ? ((data['amount'] as num).toDouble() * 100).round()
                 : 0;
-        cloudBalance += type == 'debt' ? amount : -amount;
+        if (type == 'debt') {
+          cloudDebt += amount;
+        } else if (type == 'payment') {
+          cloudPaid += amount;
+        }
       }
-      if (cloudBalance != 0) return false;
+      final cloudBalance = max(0, cloudDebt - cloudPaid);
+      final cloudCredit = max(0, cloudPaid - cloudDebt);
+      if (cloudBalance != 0 || cloudCredit != 0) return false;
 
       final batch = FirebaseFirestore.instance.batch();
       for (final doc in txSnap.docs) {
@@ -800,15 +812,19 @@ class Store extends ChangeNotifier {
     safeNotify();
   }
 
-  Future<String> ensureBackupRecoveryCode() async {
-    if (backupRecoveryCode.trim().isEmpty) {
-      backupRecoveryCode = backupService.generateRecoveryCode();
+  Future<String> ensureLocalBackupKey() async {
+    if (localBackupKey.trim().isEmpty) {
+      final bytes = List<int>.generate(
+        32,
+        (_) => Random.secure().nextInt(256),
+      );
+      localBackupKey = base64UrlEncode(bytes);
       await secureStorage.write(
-        key: 'dainpay_backup_recovery',
-        value: backupRecoveryCode,
+        key: 'dainpay_local_backup_key',
+        value: localBackupKey,
       );
     }
-    return backupRecoveryCode;
+    return localBackupKey;
   }
 
   Map<String, dynamic> backupPayload() {
@@ -828,10 +844,10 @@ class Store extends ChangeNotifier {
   }
 
   Future<DainPayBackupResult> backupToGoogleDrive() async {
-    final recovery = await ensureBackupRecoveryCode();
+    final localKey = await ensureLocalBackupKey();
     final result = await backupService.backup(
       payload: backupPayload(),
-      recoveryCode: recovery,
+      localKey: localKey,
     );
 
     if (result.localSaved) {
@@ -860,11 +876,10 @@ class Store extends ChangeNotifier {
     return result;
   }
 
-  Future<DainPayBackupResult> restoreFromGoogleDrive(
-      String recoveryCode) async {
+  Future<DainPayBackupResult> restoreFromGoogleDrive() async {
     try {
       final payload = await backupService.restore(
-        recoveryCode: recoveryCode,
+        legacyKey: legacyBackupRecoveryCode,
       );
       return _applyBackupPayload(payload);
     } catch (e) {
@@ -875,10 +890,13 @@ class Store extends ChangeNotifier {
     }
   }
 
-  Future<DainPayBackupResult> restoreFromLocalBackup(
-      String recoveryCode) async {
+  Future<DainPayBackupResult> restoreFromLocalBackup() async {
     try {
-      final payload = await backupService.restoreLocal(recoveryCode);
+      final localKey = await ensureLocalBackupKey();
+      final payload = await backupService.restoreLocal(
+        localKey: localKey,
+        legacyKey: legacyBackupRecoveryCode,
+      );
       return _applyBackupPayload(payload);
     } catch (e) {
       return DainPayBackupResult(
@@ -1048,8 +1066,21 @@ class Store extends ChangeNotifier {
   }
 
   int balance(String customerId) {
-    return transactions.where((t) => t.customerId == customerId).fold<int>(0,
-        (sum, t) => sum + (t.type == 'debt' ? t.amountCents : -t.amountCents));
+    final net = transactions.where((t) => t.customerId == customerId).fold<int>(
+          0,
+          (sum, t) =>
+              sum + (t.type == 'debt' ? t.amountCents : -t.amountCents),
+        );
+    return max(0, net);
+  }
+
+  int prepaidCredit(String customerId) {
+    final net = transactions.where((t) => t.customerId == customerId).fold<int>(
+          0,
+          (sum, t) =>
+              sum + (t.type == 'debt' ? t.amountCents : -t.amountCents),
+        );
+    return max(0, -net);
   }
 
   int debts(String customerId) {
@@ -1088,9 +1119,9 @@ class Store extends ChangeNotifier {
     if (clean.isEmpty) return false;
 
     try {
-      final callable = FirebaseFunctions.instance.httpsCallable(
-        'redeemActivationCode',
-      );
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'europe-west1',
+      ).httpsCallable('redeemActivationCode');
       final result = await callable.call({
         'code': clean,
         'deviceId': deviceId,
@@ -1116,9 +1147,9 @@ class Store extends ChangeNotifier {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
 
     try {
-      final callable = FirebaseFunctions.instance.httpsCallable(
-        'generateActivationCode',
-      );
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'europe-west1',
+      ).httpsCallable('generateActivationCode');
       final result = await callable.call({
         'adminPin': adminPin,
         'deviceId': deviceId,
@@ -1998,13 +2029,8 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
       return;
     }
 
-    if (type == 'payment' && cents > current) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('قيمة التسديد أكبر من المتبقي على العميل')),
-      );
-      return;
-    }
+    // A payment may exceed the current debt. The excess becomes prepaid
+    // credit and is automatically applied to future debts.
 
     if (type == 'debt' &&
         widget.customer.limitCents > 0 &&
@@ -2360,12 +2386,8 @@ class _VoiceReviewPageState extends State<VoiceReviewPage> {
 
     final current = widget.store.balance(customer.id);
 
-    if (type == 'payment' && cents > current) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('قيمة التسديد أكبر من المتبقي')),
-      );
-      return;
-    }
+    // A payment may exceed the current debt. The excess becomes prepaid
+    // credit and is automatically applied to future debts.
 
     if (type == 'debt' &&
         customer.limitCents > 0 &&
@@ -2603,16 +2625,19 @@ class _SettingsPageState extends State<SettingsPage> {
                         builder: (_) => AlertDialog(
                           title: const Text('تم تأمين النسخة'),
                           content: SelectableText(
-                            'تم تأمين البيانات محلياً.\n' +
-                                (result.cloudSaved
-                                    ? 'نسخة Google Drive: ${result.accountEmail ?? 'الحساب المحدد'}\n'
-                                    : 'تعذر Google Drive حالياً، لكن النسخة المحلية محفوظة.\n') +
-                                '\nرمز الاسترداد الخاص بك:\n${store.backupRecoveryCode}\n\nاحفظ هذا الرمز خارج الهاتف. بدونه لا يمكن فك النسخة بعد تغيير الجهاز.',
+                            (result.cloudSaved
+                                    ? 'تم تأمين البيانات محلياً وفي Google Drive.\n'
+                                    : 'تم تأمين البيانات محلياً. تعذر الوصول إلى Google Drive حالياً.\n') +
+                                (result.accountEmail == null
+                                    ? ''
+                                    : '\nحساب Google: ${result.accountEmail}\n') +
+                                '\nيمكن استعادة النسخة لاحقاً باختيار نفس حساب Google.\n'
+                                'ولا تحتاج إلى حفظ أي رمز.',
                           ),
                           actions: [
                             TextButton(
                               onPressed: () => Navigator.pop(context),
-                              child: const Text('حفظت الرمز'),
+                              child: const Text('تم'),
                             ),
                           ],
                         ),
@@ -2628,40 +2653,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 OutlinedButton.icon(
                   onPressed: () async {
-                    final controller = TextEditingController();
-                    final recovery = await showDialog<String>(
-                      context: context,
-                      builder: (_) => AlertDialog(
-                        title: const Text('استعادة النسخة الاحتياطية'),
-                        content: TextField(
-                          controller: controller,
-                          autofocus: true,
-                          textCapitalization: TextCapitalization.characters,
-                          decoration: const InputDecoration(
-                            labelText: 'رمز الاسترداد',
-                          ),
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context),
-                            child: const Text('إلغاء'),
-                          ),
-                          FilledButton(
-                            onPressed: () => Navigator.pop(
-                              context,
-                              controller.text.trim(),
-                            ),
-                            child: const Text('استعادة'),
-                          ),
-                        ],
-                      ),
-                    );
-                    controller.dispose();
-                    if (recovery == null ||
-                        recovery.isEmpty ||
-                        !context.mounted) return;
-                    final result =
-                        await store.restoreFromGoogleDrive(recovery);
+                    final result = await store.restoreFromGoogleDrive();
                     if (!context.mounted) return;
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(content: Text(result.message)),
@@ -2672,40 +2664,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 OutlinedButton.icon(
                   onPressed: () async {
-                    final controller = TextEditingController();
-                    final recovery = await showDialog<String>(
-                      context: context,
-                      builder: (_) => AlertDialog(
-                        title: const Text('استعادة النسخة المحلية'),
-                        content: TextField(
-                          controller: controller,
-                          autofocus: true,
-                          textCapitalization: TextCapitalization.characters,
-                          decoration: const InputDecoration(
-                            labelText: 'رمز الاسترداد',
-                          ),
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context),
-                            child: const Text('إلغاء'),
-                          ),
-                          FilledButton(
-                            onPressed: () => Navigator.pop(
-                              context,
-                              controller.text.trim(),
-                            ),
-                            child: const Text('استعادة'),
-                          ),
-                        ],
-                      ),
-                    );
-                    controller.dispose();
-                    if (recovery == null ||
-                        recovery.isEmpty ||
-                        !context.mounted) return;
-                    final result =
-                        await store.restoreFromLocalBackup(recovery);
+                    final result = await store.restoreFromLocalBackup();
                     if (!context.mounted) return;
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(content: Text(result.message)),

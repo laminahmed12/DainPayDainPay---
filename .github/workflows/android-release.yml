@@ -3,7 +3,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage, repair-v84-all-screenshot-issues, repair-v85-all-screenshot-issues ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage, repair-v84-all-screenshot-issues ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed, repair-v74-controlled-4 ]
   workflow_dispatch:
@@ -64,6 +64,8 @@ jobs:
           if 'id "com.google.gms.google-services"' not in text:
               text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services"', 1)
           text = text.replace('flutter.minSdkVersion', '23')
+          text = text.replace('flutter.compileSdkVersion', '35')
+          text = text.replace('flutter.targetSdkVersion', '35')
           app.write_text(text)
           PY
       - name: Install dependencies
@@ -132,7 +134,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v85-all-screenshot-fixes-release
+          name: dainpay-v85-final-release
           path: |
             build/app/outputs/flutter-apk/app-release.apk
             release-signing-certificate.txt

@@ -2206,7 +2206,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       if (!await _ensureMicrophonePermission()) return;
       final available = await speech.initialize(
         debugLogging: true,
-        options: const [
+        options: [
           stt.SpeechToText.androidNoBluetooth,
           stt.SpeechToText.androidIntentLookup,
         ],
@@ -2255,7 +2255,11 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       setState(() => listening = true);
 
       await speech.listen(
-        localeId: arabicLocale ?? 'ar-LY',
+        listenOptions: stt.SpeechListenOptions(
+          localeId: arabicLocale ?? 'ar-LY',
+          partialResults: true,
+          cancelOnError: true,
+        ),
         onResult: (result) async {
           if (!mounted) return;
           setState(() => live = result.recognizedWords);

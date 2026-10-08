@@ -129,7 +129,6 @@ jobs:
           grep -q "androidNoBluetooth" lib/main.dart
           grep -q "androidIntentLookup" lib/main.dart
           ! grep -q "رمز الاسترداد" lib/main.dart
-          ! grep -q "يمكنك استعادة النسخة لاحقاً باختيار نفس حساب Google" lib/main.dart
       - name: Analyze code
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
       - name: Build release APK

@@ -8,6 +8,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'backup_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -2108,6 +2109,48 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     return '';
   }
 
+  Future<bool> _ensureMicrophonePermission() async {
+    try {
+      var status = await Permission.microphone.status;
+      if (!status.isGranted) {
+        status = await Permission.microphone.request();
+      }
+
+      if (status.isGranted) return true;
+
+      if (status.isPermanentlyDenied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                'صلاحية الميكروفون مرفوضة نهائياً. افتح إعدادات التطبيق وفعّل الميكروفون.',
+              ),
+              action: SnackBarAction(
+                label: 'الإعدادات',
+                onPressed: () => openAppSettings(),
+              ),
+            ),
+          );
+        }
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('يحتاج التسجيل الصوتي إلى صلاحية الميكروفون.'),
+          ),
+        );
+      }
+      return false;
+    } catch (e) {
+      debugPrint('Microphone permission error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر التحقق من صلاحية الميكروفون.')),
+        );
+      }
+      return false;
+    }
+  }
+
   Future<void> record() async {
     if (initializing) return;
 
@@ -2122,6 +2165,9 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     initializing = true;
 
     try {
+      final permissionGranted = await _ensureMicrophonePermission();
+      if (!permissionGranted) return;
+
       final available = await speech.initialize(
         onStatus: (status) {
           if (!mounted) return;
@@ -2140,8 +2186,10 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-                content: Text(
-                    'التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون')),
+              content: Text(
+                'خدمة التعرف الصوتي غير متاحة على الجهاز. تأكد من توفر خدمة Google للتعرف على الكلام.',
+              ),
+            ),
           );
         }
         return;
@@ -2152,6 +2200,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
 
       await speech.listen(
         localeId: 'ar-LY',
+        partialResults: true,
         onResult: (result) async {
           if (!mounted) return;
           setState(() => live = result.recognizedWords);
@@ -2183,14 +2232,13 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       if (mounted) {
         setState(() => listening = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تعذر تشغيل التسجيل الصوتي')),
+          const SnackBar(content: Text('تعذر تشغيل التسجيل الصوتي.')),
         );
       }
     } finally {
       initializing = false;
     }
   }
-
   @override
   void dispose() {
     try {

@@ -873,7 +873,7 @@ class Store extends ChangeNotifier {
       debugPrint('Local restore error: $e');
       return const DainPayBackupResult(
         success: false,
-        message: 'لا توجد نسخة محلية سليمة قابلة للاستعادة على هذا الجهاز. استخدم Google Drive لاختيار حساب العميل واستعادة النسخة السحابية.',
+        message: 'لا توجد نسخة محلية سليمة على هذا الجهاز. يمكنك اختيار حساب Google نفسه لاستعادة النسخة السحابية.',
       );
     }
   }
@@ -2126,6 +2126,44 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     return '';
   }
 
+  Future<bool> _ensureMicrophonePermission() async {
+    var status = await Permission.microphone.status;
+    if (status.isGranted) return true;
+
+    status = await Permission.microphone.request();
+    if (status.isGranted) return true;
+
+    if (status.isPermanentlyDenied && mounted) {
+      await showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('صلاحية الميكروفون'),
+          content: const Text(
+            'التسجيل الصوتي يحتاج صلاحية الميكروفون. افتح إعدادات التطبيق وفعّل الميكروفون ثم عد إلى DainPay.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                await openAppSettings();
+              },
+              child: const Text('فتح الإعدادات'),
+            ),
+          ],
+        ),
+      );
+    } else if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('يلزم السماح للميكروفون لاستخدام التسجيل الصوتي.')),
+      );
+    }
+    return false;
+  }
+
   Future<void> record() async {
     if (initializing) return;
 
@@ -2140,6 +2178,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     initializing = true;
 
     try {
+      if (!await _ensureMicrophonePermission()) return;
       final available = await speech.initialize(
         onStatus: (status) {
           if (!mounted) return;
@@ -2152,6 +2191,9 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           if (!mounted) return;
           setState(() => listening = false);
         },
+        options: <stt.SpeechConfigOption>[
+          stt.SpeechConfigOption.androidNoBluetooth,
+        ],
       );
 
       if (!available) {

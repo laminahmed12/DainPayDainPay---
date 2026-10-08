@@ -4,13 +4,13 @@ const admin=require("firebase-admin");
 const crypto=require("crypto");
 
 admin.initializeApp();
-setGlobalOptions({region:"us-central1",maxInstances:5,invoker:"public",enforceAppCheck:false});
+setGlobalOptions({region:"us-central1",maxInstances:5,enforceAppCheck:false});
 
 const db=admin.firestore();
 
 // Kept server-side so activation-code writes/redemption are never trusted to
 // the Flutter client. Move this value to Secret Manager before public launch.
-const OWNER_ADMIN_PIN=process.env.OWNER_ADMIN_PIN || "116936";
+const OWNER_ADMIN_PIN=String(process.env.OWNER_ADMIN_PIN || "116936").trim();
 
 function requireAuth(request){
   if(!request.auth || !request.auth.uid){

@@ -1,11 +1,8 @@
-const {onCall,HttpsError}=require("firebase-functions/v2/https");
-const {setGlobalOptions}=require("firebase-functions/v2/options");
+const functions = require("firebase-functions/v1");
 const admin=require("firebase-admin");
 const crypto=require("crypto");
 
 admin.initializeApp();
-setGlobalOptions({region:"us-central1",maxInstances:5,invoker:"public"});
-
 const db=admin.firestore();
 
 // Kept server-side so activation-code writes/redemption are never trusted to
@@ -14,14 +11,14 @@ const OWNER_ADMIN_PIN=process.env.OWNER_ADMIN_PIN || "116936";
 
 function requireAuth(request){
   if(!request.auth || !request.auth.uid){
-    throw new HttpsError("unauthenticated","يجب تسجيل الدخول.");
+    throw new functions.https.HttpsError("unauthenticated","يجب تسجيل الدخول.");
   }
   return request.auth.uid;
 }
 
-exports.generateActivationCode=onCall(async(request)=>{
-  const uid=requireAuth(request);
-  const pin=String(request.data?.adminPin || "");
+exports.generateActivationCode = functions.region("us-central1").https.onCall(async (data, context) => {
+  const uid=requireAuth(data, context);
+  const pin=String(data?.adminPin || "");
   if(pin !== OWNER_ADMIN_PIN){
     throw new HttpsError("permission-denied","رمز المالك غير صحيح.");
   }
@@ -34,7 +31,7 @@ exports.generateActivationCode=onCall(async(request)=>{
         used:false,
         createdAt:admin.firestore.FieldValue.serverTimestamp(),
         createdByUid:uid,
-        deviceId:String(request.data?.deviceId || ""),
+        deviceId:String(data?.deviceId || ""),
       });
       return {success:true,code};
     }catch(error){
@@ -47,9 +44,9 @@ exports.generateActivationCode=onCall(async(request)=>{
   throw new HttpsError("resource-exhausted","تعذر إنشاء رمز فريد حالياً.");
 });
 
-exports.redeemActivationCode=onCall(async(request)=>{
+exports.redeemActivationCode = functions.region("us-central1").https.onCall(async (data, context) => {
   const uid=requireAuth(request);
-  const code=String(request.data?.code || "").replace(/\D/g,"");
+  const code=String(data?.code || "").replace(/\D/g,"");
   if(!/^\d{6}$/.test(code)){
     throw new HttpsError("invalid-argument","رمز التفعيل غير صالح.");
   }
@@ -65,7 +62,7 @@ exports.redeemActivationCode=onCall(async(request)=>{
       used:true,
       usedAt:admin.firestore.FieldValue.serverTimestamp(),
       usedUid:uid,
-      usedDeviceId:String(request.data?.deviceId || ""),
+      usedDeviceId:String(data?.deviceId || ""),
     });
 
     return true;
@@ -78,7 +75,7 @@ exports.redeemActivationCode=onCall(async(request)=>{
   await db.collection("users").doc(uid).set({
     activated:true,
     activatedAt:admin.firestore.FieldValue.serverTimestamp(),
-    activatedDeviceId:String(request.data?.deviceId || ""),
+    activatedDeviceId:String(data?.deviceId || ""),
   },{merge:true});
 
   return {success:true};

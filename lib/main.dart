@@ -1023,10 +1023,18 @@ class Store extends ChangeNotifier {
     if (!RegExp(r'^\d{6}$').hasMatch(clean)) return false;
 
     try {
+      await FirebaseAuth.instance.currentUser?.getIdToken(true);
       final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
-          .httpsCallable('redeemActivationCode',
-              options: HttpsCallableOptions(timeout: const Duration(seconds: 30)));
-      final result = await callable.call({'code': clean, 'deviceId': deviceId});
+          .httpsCallable(
+            'redeemActivationCode',
+            options: HttpsCallableOptions(
+              timeout: const Duration(seconds: 30),
+            ),
+          );
+      final result = await callable.call({
+        'code': clean,
+        'deviceId': deviceId,
+      });
       final data = result.data;
       if (data is Map && data['success'] == true) {
         activated = true;
@@ -1037,7 +1045,13 @@ class Store extends ChangeNotifier {
       return false;
     } on FirebaseFunctionsException catch (e) {
       debugPrint('Activation function error: ${e.code}: ${e.message ?? ''}');
-      if (!{'permission-denied','not-found','unavailable','deadline-exceeded'}.contains(e.code)) {
+      if (!{
+        'permission-denied',
+        'not-found',
+        'unavailable',
+        'deadline-exceeded',
+        'unauthenticated',
+      }.contains(e.code)) {
         return false;
       }
       try {
@@ -1078,10 +1092,18 @@ class Store extends ChangeNotifier {
   Future<String?> generateCode() async {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
     try {
+      await FirebaseAuth.instance.currentUser?.getIdToken(true);
       final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
-          .httpsCallable('generateActivationCode',
-              options: HttpsCallableOptions(timeout: const Duration(seconds: 30)));
-      final result = await callable.call({'adminPin': adminPin, 'deviceId': deviceId});
+          .httpsCallable(
+            'generateActivationCode',
+            options: HttpsCallableOptions(
+              timeout: const Duration(seconds: 30),
+            ),
+          );
+      final result = await callable.call({
+        'adminPin': adminPin,
+        'deviceId': deviceId,
+      });
       final data = result.data;
       if (data is Map && data['code'] is String) return data['code'] as String;
       throw StateError('استجابة غير صالحة من خدمة التفعيل.');
@@ -1108,7 +1130,10 @@ class Store extends ChangeNotifier {
           break;
         }
       }
-      throw StateError('خدمة التفعيل غير متاحة حالياً. حاول مرة أخرى بعد الاتصال بـ Firebase.');
+      throw StateError(
+        'تعذر الوصول إلى خدمة التفعيل الآمنة حالياً. '
+        'تأكد من اتصال الإنترنت ثم حاول مرة أخرى.',
+      );
     } catch (e) {
       debugPrint('Generate activation code error: $e');
       rethrow;
@@ -2180,6 +2205,11 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     try {
       if (!await _ensureMicrophonePermission()) return;
       final available = await speech.initialize(
+        debugLogging: true,
+        options: [
+          stt.SpeechToText.androidNoBluetooth,
+          stt.SpeechToText.androidIntentLookup,
+        ],
         onStatus: (status) {
           if (!mounted) return;
           if (status == 'notListening' || status == 'done') {
@@ -2197,18 +2227,39 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-                content: Text(
-                    'التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون')),
+              content: Text(
+                'التعرف الصوتي غير متاح على الجهاز حالياً. '
+                'تأكد من تفعيل خدمة التعرف الصوتي ثم حاول مرة أخرى.',
+              ),
+            ),
           );
         }
         return;
       }
 
       if (!mounted) return;
+
+      final locales = await speech.locales();
+      String? arabicLocale;
+      for (final locale in locales) {
+        if (locale.localeId.toLowerCase() == 'ar-ly') {
+          arabicLocale = locale.localeId;
+          break;
+        }
+      }
+      arabicLocale ??= locales
+          .where((locale) => locale.localeId.toLowerCase().startsWith('ar-'))
+          .map((locale) => locale.localeId)
+          .firstOrNull;
+
       setState(() => listening = true);
 
       await speech.listen(
-        localeId: 'ar-LY',
+        listenOptions: stt.SpeechListenOptions(
+          localeId: arabicLocale ?? 'ar-LY',
+          partialResults: true,
+          cancelOnError: true,
+        ),
         onResult: (result) async {
           if (!mounted) return;
           setState(() => live = result.recognizedWords);
@@ -2240,7 +2291,12 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       if (mounted) {
         setState(() => listening = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تعذر تشغيل التسجيل الصوتي')),
+          const SnackBar(
+            content: Text(
+              'تعذر تشغيل التعرف الصوتي. تحقق من صلاحية الميكروفون '
+              'وخدمة التعرف الصوتي في الهاتف.',
+            ),
+          ),
         );
       }
     } finally {

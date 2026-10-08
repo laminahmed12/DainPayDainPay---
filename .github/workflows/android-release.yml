@@ -125,7 +125,7 @@ jobs:
           grep -q 'android.speech.RecognitionService' android/app/src/main/AndroidManifest.xml
       - name: Verify DainPay screenshot fixes
         run: |
-          grep -q "speech_to_text: 7.4.0" pubspec.yaml
+          grep -q "speech_to_text: 6.6.2" pubspec.yaml
           grep -q "androidNoBluetooth" lib/main.dart
           grep -q "androidIntentLookup" lib/main.dart
           ! grep -q "رمز الاسترداد" lib/main.dart

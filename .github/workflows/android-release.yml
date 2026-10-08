@@ -3,7 +3,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage, repair-v84-all-screenshot-issues ]
+    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage, repair-v84-all-screenshot-issues, repair-v86-all-screenshot-fixes ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed, repair-v74-controlled-4 ]
   workflow_dispatch:
@@ -123,6 +123,13 @@ jobs:
         run: |
           grep -q 'android.permission.RECORD_AUDIO' android/app/src/main/AndroidManifest.xml
           grep -q 'android.speech.RecognitionService' android/app/src/main/AndroidManifest.xml
+      - name: Verify DainPay screenshot fixes
+        run: |
+          grep -q "speech_to_text: 7.4.0" pubspec.yaml
+          grep -q "androidNoBluetooth" lib/main.dart
+          grep -q "androidIntentLookup" lib/main.dart
+          ! grep -q "رمز الاسترداد" lib/main.dart
+          ! grep -q "يمكنك استعادة النسخة لاحقاً باختيار نفس حساب Google" lib/main.dart
       - name: Analyze code
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
       - name: Build release APK
@@ -134,7 +141,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v85-final-release
+          name: dainpay-v86-all-screenshot-fixes-release
           path: |
             build/app/outputs/flutter-apk/app-release.apk
             release-signing-certificate.txt

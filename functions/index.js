@@ -20,7 +20,7 @@ exports.generateActivationCode = functions.region("us-central1").https.onCall(as
   const uid=requireAuth(data, context);
   const pin=String(data?.adminPin || "");
   if(pin !== OWNER_ADMIN_PIN){
-    throw new HttpsError("permission-denied","رمز المالك غير صحيح.");
+    throw new functions.https.HttpsError("permission-denied","رمز المالك غير صحيح.");
   }
 
   for(let attempt=0;attempt<100;attempt++){
@@ -37,26 +37,26 @@ exports.generateActivationCode = functions.region("us-central1").https.onCall(as
     }catch(error){
       if(error.code===6 || error.code==="already-exists") continue;
       console.error("activation create failed",error);
-      throw new HttpsError("internal","تعذر إنشاء رمز التفعيل.");
+      throw new functions.https.HttpsError("internal","تعذر إنشاء رمز التفعيل.");
     }
   }
 
-  throw new HttpsError("resource-exhausted","تعذر إنشاء رمز فريد حالياً.");
+  throw new functions.https.HttpsError("resource-exhausted","تعذر إنشاء رمز فريد حالياً.");
 });
 
 exports.redeemActivationCode = functions.region("us-central1").https.onCall(async (data, context) => {
-  const uid=requireAuth(request);
+  const uid=requireAuth(data, context);
   const code=String(data?.code || "").replace(/\D/g,"");
   if(!/^\d{6}$/.test(code)){
-    throw new HttpsError("invalid-argument","رمز التفعيل غير صالح.");
+    throw new functions.https.HttpsError("invalid-argument","رمز التفعيل غير صالح.");
   }
 
   const ref=db.collection("activation_codes").doc(code);
   const result=await db.runTransaction(async(tx)=>{
     const snap=await tx.get(ref);
     if(!snap.exists) return false;
-    const data=snap.data() || {};
-    if(data.used===true) return false;
+    const record=snap.data() || {};
+    if(record.used===true) return false;
 
     tx.update(ref,{
       used:true,

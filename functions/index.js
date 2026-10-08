@@ -4,7 +4,7 @@ const admin=require("firebase-admin");
 const crypto=require("crypto");
 
 admin.initializeApp();
-setGlobalOptions({region:"us-central1",maxInstances:5});
+setGlobalOptions({region:"us-central1",maxInstances:5,invoker:"public",enforceAppCheck:false});
 
 const db=admin.firestore();
 
@@ -19,7 +19,7 @@ function requireAuth(request){
   return request.auth.uid;
 }
 
-exports.generateActivationCode=onCall({invoker:"public"},async(request)=>{
+exports.generateActivationCode=onCall({invoker:"public",enforceAppCheck:false},async(request)=>{
   const uid=requireAuth(request);
   const pin=String(request.data?.adminPin || "");
   if(pin !== OWNER_ADMIN_PIN){

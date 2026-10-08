@@ -1095,7 +1095,7 @@ class Store extends ChangeNotifier {
       for (var attempt = 0; attempt < 50; attempt++) {
         final code = (100000 + Random.secure().nextInt(900000)).toString();
         try {
-          await activationCodesRef.doc(code).create({
+          await activationCodesRef.doc(code).set({
             'used': false,
             'createdAt': FieldValue.serverTimestamp(),
             'createdByUid': uid,
@@ -2191,9 +2191,6 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           if (!mounted) return;
           setState(() => listening = false);
         },
-        options: <stt.SpeechConfigOption>[
-          stt.SpeechConfigOption.androidNoBluetooth,
-        ],
       );
 
       if (!available) {

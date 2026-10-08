@@ -1090,9 +1090,18 @@ class Store extends ChangeNotifier {
   }
 
   Future<String?> generateCode() async {
-    if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
+    if (!firebaseReady || !isAdmin || uid.isEmpty) {
+      throw StateError('تعذر الاتصال بحساب المالك في Firebase.');
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw StateError('جلسة Firebase غير جاهزة. أعد المحاولة بعد لحظات.');
+    }
+
     try {
-      await FirebaseAuth.instance.currentUser?.getIdToken(true);
+      await user.getIdToken(true);
+
       final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
           .httpsCallable(
             'generateActivationCode',
@@ -1100,46 +1109,52 @@ class Store extends ChangeNotifier {
               timeout: const Duration(seconds: 30),
             ),
           );
+
       final result = await callable.call({
         'adminPin': adminPin,
         'deviceId': deviceId,
       });
+
       final data = result.data;
-      if (data is Map && data['code'] is String) return data['code'] as String;
-      throw StateError('استجابة غير صالحة من خدمة التفعيل.');
+      if (data is Map && data['success'] == true && data['code'] is String) {
+        return data['code'] as String;
+      }
+
+      throw StateError('خدمة التفعيل أعادت استجابة غير صالحة.');
     } on FirebaseFunctionsException catch (e) {
-      debugPrint('Generate activation function error: ${e.code}: ${e.message ?? ''}');
-      if (!{'permission-denied','not-found','unavailable','deadline-exceeded'}.contains(e.code)) {
-        throw StateError('تعذر توليد رمز التفعيل حالياً.');
-      }
-      // Compatibility fallback for installations where the callable backend
-      // has not propagated yet. It is only attempted after a callable failure.
-      for (var attempt = 0; attempt < 50; attempt++) {
-        final code = (100000 + Random.secure().nextInt(900000)).toString();
-        try {
-          await activationCodesRef.doc(code).set({
-            'used': false,
-            'createdAt': FieldValue.serverTimestamp(),
-            'createdByUid': uid,
-            'deviceId': deviceId,
-          });
-          return code;
-        } on FirebaseException catch (writeError) {
-          if (writeError.code == 'already-exists') continue;
-          debugPrint('Activation fallback error: ${writeError.code}');
-          break;
-        }
-      }
-      throw StateError(
-        'تعذر الوصول إلى خدمة التفعيل الآمنة حالياً. '
-        'تأكد من اتصال الإنترنت ثم حاول مرة أخرى.',
+      debugPrint(
+        'Generate activation function error: ${e.code}: ${e.message ?? ''}',
       );
+
+      switch (e.code) {
+        case 'permission-denied':
+          throw StateError(
+            'تم رفض طلب توليد رمز التفعيل. تحقق من نشر خدمة التفعيل في Firebase.',
+          );
+        case 'unauthenticated':
+          throw StateError('جلسة Firebase منتهية. أعد المحاولة.');
+        case 'not-found':
+          throw StateError(
+            'خدمة التفعيل غير منشورة في Firebase أو المنطقة غير صحيحة.',
+          );
+        case 'unavailable':
+        case 'deadline-exceeded':
+          throw StateError(
+            'خدمة التفعيل غير متاحة حالياً. تحقق من اتصال الإنترنت ثم أعد المحاولة.',
+          );
+        case 'invalid-argument':
+          throw StateError('بيانات طلب التفعيل غير صحيحة.');
+        default:
+          throw StateError(
+            'تعذر توليد رمز التفعيل حالياً. رمز الخطأ: ${e.code}.',
+          );
+      }
     } catch (e) {
-      debugPrint('Generate activation code error: $e');
-      rethrow;
+      debugPrint('Generate activation error: $e');
+      if (e is StateError) rethrow;
+      throw StateError('تعذر توليد رمز التفعيل حالياً.');
     }
   }
-
   bool checkAdminLocal(String pin) {
     final valid = _digits(pin).trim() == adminPin;
     isAdmin = valid;
@@ -2220,17 +2235,40 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           debugPrint('Speech error: $error');
           if (!mounted) return;
           setState(() => listening = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'تعذر تشغيل التعرف الصوتي. تحقق من الميكروفون وخدمة التعرف الصوتي.',
+              ),
+            ),
+          );
         },
       );
 
       if (!available) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'التعرف الصوتي غير متاح على الجهاز حالياً. '
-                'تأكد من تفعيل خدمة التعرف الصوتي ثم حاول مرة أخرى.',
+          await showDialog<void>(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text('التعرف الصوتي غير متاح'),
+              content: const Text(
+                'لم يتمكن DainPay من تشغيل خدمة التعرف الصوتي. '
+                'تأكد من السماح بالميكروفون وتفعيل خدمة التعرف الصوتي في الهاتف، '
+                'ثم أعد المحاولة.',
               ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('إغلاق'),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    Navigator.pop(context);
+                    await openAppSettings();
+                  },
+                  child: const Text('إعدادات التطبيق'),
+                ),
+              ],
             ),
           );
         }

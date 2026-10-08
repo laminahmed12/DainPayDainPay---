@@ -4,7 +4,7 @@ const admin=require("firebase-admin");
 const crypto=require("crypto");
 
 admin.initializeApp();
-setGlobalOptions({region:"us-central1",maxInstances:5,invoker:"public"});
+setGlobalOptions({region:"us-central1",maxInstances:5});
 
 const db=admin.firestore();
 
@@ -19,7 +19,7 @@ function requireAuth(request){
   return request.auth.uid;
 }
 
-exports.generateActivationCode=onCall(async(request)=>{
+exports.generateActivationCode=onCall({invoker:"public"},async(request)=>{
   const uid=requireAuth(request);
   const pin=String(request.data?.adminPin || "");
   if(pin !== OWNER_ADMIN_PIN){
@@ -47,7 +47,7 @@ exports.generateActivationCode=onCall(async(request)=>{
   throw new HttpsError("resource-exhausted","تعذر إنشاء رمز فريد حالياً.");
 });
 
-exports.redeemActivationCode=onCall(async(request)=>{
+exports.redeemActivationCode=onCall({invoker:"public"},async(request)=>{
   const uid=requireAuth(request);
   const code=String(request.data?.code || "").replace(/\D/g,"");
   if(!/^\d{6}$/.test(code)){

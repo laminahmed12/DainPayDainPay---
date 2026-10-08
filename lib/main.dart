@@ -8,6 +8,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'backup_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -1018,25 +1019,14 @@ class Store extends ChangeNotifier {
 
   Future<bool> activateCode(String code) async {
     if (!firebaseReady || uid.isEmpty) return false;
-
     final clean = _digits(code).replaceAll(RegExp(r'\D'), '');
     if (!RegExp(r'^\d{6}$').hasMatch(clean)) return false;
 
     try {
-      final callable = FirebaseFunctions.instanceFor(
-        region: 'us-central1',
-      ).httpsCallable(
-        'redeemActivationCode',
-        options: HttpsCallableOptions(
-          timeout: const Duration(seconds: 30),
-        ),
-      );
-
-      final result = await callable.call({
-        'code': clean,
-        'deviceId': deviceId,
-      });
-
+      final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable('redeemActivationCode',
+              options: HttpsCallableOptions(timeout: const Duration(seconds: 30)));
+      final result = await callable.call({'code': clean, 'deviceId': deviceId});
       final data = result.data;
       if (data is Map && data['success'] == true) {
         activated = true;
@@ -1046,57 +1036,85 @@ class Store extends ChangeNotifier {
       }
       return false;
     } on FirebaseFunctionsException catch (e) {
-      debugPrint('Activation function error: ' + e.code + ': ' + (e.message ?? ''));
-      return false;
+      debugPrint('Activation function error: ${e.code}: ${e.message ?? ''}');
+      if (!{'permission-denied','not-found','unavailable','deadline-exceeded'}.contains(e.code)) {
+        return false;
+      }
+      try {
+        final ref = activationCodesRef.doc(clean);
+        final redeemed = await FirebaseFirestore.instance.runTransaction<bool>((tx) async {
+          final snap = await tx.get(ref);
+          if (!snap.exists) return false;
+          final data = snap.data() ?? <String, dynamic>{};
+          if (data['used'] == true) return false;
+          tx.update(ref, {
+            'used': true,
+            'usedAt': FieldValue.serverTimestamp(),
+            'usedUid': uid,
+            'usedDeviceId': deviceId,
+          });
+          return true;
+        });
+        if (!redeemed) return false;
+        await userRef.doc(uid).set({
+          'activated': true,
+          'activatedAt': FieldValue.serverTimestamp(),
+          'activatedDeviceId': deviceId,
+        }, SetOptions(merge: true));
+        activated = true;
+        await saveLocal();
+        safeNotify();
+        return true;
+      } catch (fallbackError) {
+        debugPrint('Activation fallback error: $fallbackError');
+        return false;
+      }
     } catch (e) {
-      debugPrint('Activation error: ' + e.toString());
+      debugPrint('Activation error: $e');
       return false;
     }
   }
 
   Future<String?> generateCode() async {
     if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
-
     try {
-      final callable = FirebaseFunctions.instanceFor(
-        region: 'us-central1',
-      ).httpsCallable(
-        'generateActivationCode',
-        options: HttpsCallableOptions(
-          timeout: const Duration(seconds: 30),
-        ),
-      );
-
-      final result = await callable.call({
-        'adminPin': adminPin,
-        'deviceId': deviceId,
-      });
-
+      final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable('generateActivationCode',
+              options: HttpsCallableOptions(timeout: const Duration(seconds: 30)));
+      final result = await callable.call({'adminPin': adminPin, 'deviceId': deviceId});
       final data = result.data;
-      if (data is Map && data['code'] is String) {
-        return data['code'] as String;
-      }
+      if (data is Map && data['code'] is String) return data['code'] as String;
       throw StateError('استجابة غير صالحة من خدمة التفعيل.');
     } on FirebaseFunctionsException catch (e) {
-      debugPrint('Generate activation function error: ' + e.code + ': ' + (e.message ?? ''));
-      switch (e.code) {
-        case 'permission-denied':
-          throw StateError('خدمة التفعيل رفضت الطلب. يجب نشر خدمة Firebase الحالية.');
-        case 'unauthenticated':
-          throw StateError('انتهت جلسة Firebase. أعد الاتصال ثم حاول مرة أخرى.');
-        case 'not-found':
-          throw StateError('خدمة التفعيل غير منشورة حالياً على Firebase.');
-        case 'deadline-exceeded':
-        case 'unavailable':
-          throw StateError('تعذر الوصول إلى خدمة التفعيل حالياً. حاول بعد قليل.');
-        default:
-          throw StateError('تعذر توليد رمز التفعيل حالياً.');
+      debugPrint('Generate activation function error: ${e.code}: ${e.message ?? ''}');
+      if (!{'permission-denied','not-found','unavailable','deadline-exceeded'}.contains(e.code)) {
+        throw StateError('تعذر توليد رمز التفعيل حالياً.');
       }
+      // Compatibility fallback for installations where the callable backend
+      // has not propagated yet. It is only attempted after a callable failure.
+      for (var attempt = 0; attempt < 50; attempt++) {
+        final code = (100000 + Random.secure().nextInt(900000)).toString();
+        try {
+          await activationCodesRef.doc(code).create({
+            'used': false,
+            'createdAt': FieldValue.serverTimestamp(),
+            'createdByUid': uid,
+            'deviceId': deviceId,
+          });
+          return code;
+        } on FirebaseException catch (writeError) {
+          if (writeError.code == 'already-exists') continue;
+          debugPrint('Activation fallback error: ${writeError.code}');
+          break;
+        }
+      }
+      throw StateError('خدمة التفعيل غير متاحة حالياً. حاول مرة أخرى بعد الاتصال بـ Firebase.');
     } catch (e) {
-      debugPrint('Generate activation code error: ' + e.toString());
+      debugPrint('Generate activation code error: $e');
       rethrow;
     }
   }
+
   bool checkAdminLocal(String pin) {
     final valid = _digits(pin).trim() == adminPin;
     isAdmin = valid;

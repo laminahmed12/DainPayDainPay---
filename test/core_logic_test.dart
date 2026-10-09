@@ -2,6 +2,24 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:dainpay/main.dart';
 
 void main() {
+  group('Arabic speech locale selection', () {
+    test('prefers Libyan Arabic when available', () {
+      expect(
+        selectArabicSpeechLocale(['en-US', 'ar-SA', 'ar_LY']),
+        'ar_LY',
+      );
+    });
+
+    test('accepts generic Arabic locale reported by Android', () {
+      expect(selectArabicSpeechLocale(['en-US', 'ar']), 'ar');
+    });
+
+    test('returns null when no Arabic locale exists', () {
+      expect(selectArabicSpeechLocale(['en-US', 'fr-FR']), isNull);
+    });
+  });
+
+
   group('DainPay money parsing', () {
     test('parses whole and decimal Libyan dinar amounts', () {
       expect(parseCents('187'), 18700);

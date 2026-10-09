@@ -1,15 +1,18 @@
 name: DainPay Android Release
-# Final release validation trigger
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage, repair-v84-all-screenshot-issues, repair-v86-all-screenshot-fixes ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, repair-v74-controlled-4 ]
+    branches: [ main ]
   workflow_dispatch:
 
+concurrency:
+  group: dainpay-release-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -25,7 +28,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.5'
+          flutter-version: '3.35.4'
           channel: stable
           cache: true
       - name: Preserve Firebase configuration
@@ -141,7 +144,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v88-performance-backup-activation-voice-release
+          name: dainpay-1.6.9-build-release
           path: |
             build/app/outputs/flutter-apk/app-release.apk
             release-signing-certificate.txt

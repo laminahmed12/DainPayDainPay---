@@ -21,7 +21,6 @@ const Color mint = Color(0xFF2EC4B6);
 const Color burgundy = Color(0xFFE63946);
 
 const int trialLengthDays = 7;
-const String adminPin = '116936';
 const String appTitle = 'DainPay — دَيْن';
 const String functionsRegion = 'us-central1';
 
@@ -439,6 +438,7 @@ class Store extends ChangeNotifier {
 
   final DainPayBackupService backupService = DainPayBackupService();
   String localBackupKey = '';
+  String ownerPinSession = '';
   DateTime? lastBackupAt;
   DateTime? lastLocalBackupAt;
   String backupGoogleEmail = '';
@@ -463,13 +463,21 @@ class Store extends ChangeNotifier {
     store.localBackupKey =
         await store.secureStorage.read(key: 'dainpay_local_backup_key') ?? '';
     if (store.localBackupKey.isEmpty) {
-      store.localBackupKey =
+      // One-time migration: preserve existing encrypted backups by moving the
+      // legacy key to secure storage before deleting its plaintext copy.
+      final legacyKey =
           store.prefs.getString('dainpay_local_backup_key') ?? '';
-      if (store.localBackupKey.isNotEmpty) {
+      if (legacyKey.isNotEmpty) {
         await store.secureStorage.write(
           key: 'dainpay_local_backup_key',
-          value: store.localBackupKey,
+          value: legacyKey,
         );
+        store.localBackupKey =
+            await store.secureStorage.read(key: 'dainpay_local_backup_key') ?? '';
+        if (store.localBackupKey.isEmpty) {
+          throw StateError('تعذر ترحيل مفتاح النسخة الاحتياطية بأمان.');
+        }
+        await store.prefs.remove('dainpay_local_backup_key');
       }
     }
     final lastBackup = store.prefs.getString('last_backup_at');
@@ -534,9 +542,13 @@ class Store extends ChangeNotifier {
 
   Future<void> _pref(Future<bool> Function() action) async {
     try {
-      await action();
+      final saved = await action();
+      if (!saved) {
+        throw StateError('SharedPreferences rejected a write operation.');
+      }
     } catch (e) {
       debugPrint('SharedPreferences error: $e');
+      rethrow;
     }
   }
 
@@ -824,9 +836,11 @@ class Store extends ChangeNotifier {
         key: 'dainpay_local_backup_key',
         value: localBackupKey,
       );
-      await _pref(
-        () => prefs.setString('dainpay_local_backup_key', localBackupKey),
-      );
+      final storedKey = await secureStorage.read(key: 'dainpay_local_backup_key');
+      if (storedKey != localBackupKey) {
+        throw StateError('تعذر حفظ مفتاح النسخة الاحتياطية في التخزين الآمن.');
+      }
+      await prefs.remove('dainpay_local_backup_key');
     }
     return localBackupKey;
   }
@@ -1051,7 +1065,9 @@ class Store extends ChangeNotifier {
 
   String risk(String customerId) {
     final current = balance(customerId);
-    if (current <= 0) return 'مسدد';
+    if (current <= 0) {
+      return prepaidCredit(customerId) > 0 ? 'له رصيد دائن' : 'مسدد';
+    }
 
     final debtsForCustomer = transactions
         .where((t) => t.customerId == customerId && t.type == 'debt')
@@ -1103,8 +1119,2029 @@ class Store extends ChangeNotifier {
     }
   }
 
+  Future<bool> verifyOwnerPin(String pin) async {
+    if (!firebaseReady || uid.isEmpty) {
+      throw StateError('يلزم الاتصال بالإنترنت للتحقق من رمز المالك.');
+    }
+    final normalizedPin = _digits(pin).trim();
+    if (!RegExp(r'^\\d{6,12}      throw StateError('تعذر الاتصال بحساب المالك في Firebase.');
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw StateError('جلسة Firebase غير جاهزة. أعد المحاولة بعد لحظات.');
+    }
+
+    try {
+      await user.getIdToken();
+
+      final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable(
+            'generateActivationCode',
+            options: HttpsCallableOptions(
+              timeout: const Duration(seconds: 30),
+            ),
+          );
+
+      final result = await callable.call({
+        'adminPin': ownerPinSession,
+        'deviceId': deviceId,
+      });
+
+      final data = result.data;
+      if (data is Map && data['success'] == true && data['code'] is String) {
+        return data['code'] as String;
+      }
+
+      throw StateError('خدمة التفعيل أعادت استجابة غير صالحة.');
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint(
+        'Generate activation function error: ${e.code}: ${e.message ?? ''}',
+      );
+
+      switch (e.code) {
+        case 'permission-denied':
+          throw StateError(
+            'خدمة توليد رمز التفعيل رفضت الطلب. تأكد أن دالة generateActivationCode منشورة في Firebase وأن جلسة المالك صالحة.',
+          );
+        case 'unauthenticated':
+          throw StateError('جلسة Firebase منتهية. أعد المحاولة.');
+        case 'not-found':
+          throw StateError(
+            'خدمة التفعيل غير منشورة في Firebase أو المنطقة غير صحيحة.',
+          );
+        case 'unavailable':
+        case 'deadline-exceeded':
+          throw StateError(
+            'خدمة التفعيل غير متاحة حالياً. تحقق من اتصال الإنترنت ثم أعد المحاولة.',
+          );
+        case 'invalid-argument':
+          throw StateError('بيانات طلب التفعيل غير صحيحة.');
+        default:
+          throw StateError(
+            'تعذر توليد رمز التفعيل حالياً. رمز الخطأ: ${e.code}.',
+          );
+      }
+    } catch (e) {
+      debugPrint('Generate activation error: $e');
+      if (e is StateError) rethrow;
+      throw StateError('تعذر توليد رمز التفعيل حالياً.');
+    }
+  }
+  void endAdminSession() {
+    ownerPinSession = '';
+    isAdmin = false;
+    safeNotify();
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Application
+// -----------------------------------------------------------------------------
+
+class DainPayApp extends StatelessWidget {
+  const DainPayApp({super.key, required this.store});
+
+  final Store store;
+
+  ThemeData _theme(Brightness brightness) {
+    final scheme = ColorScheme.fromSeed(
+      seedColor: emerald,
+      brightness: brightness,
+    ).copyWith(
+      primary: emerald,
+      secondary: mint,
+      error: burgundy,
+    );
+
+    return ThemeData(
+      useMaterial3: true,
+      brightness: brightness,
+      colorScheme: scheme,
+      fontFamily: 'Cairo',
+      scaffoldBackgroundColor: brightness == Brightness.light
+          ? const Color(0xFFF6F9FA)
+          : const Color(0xFF101719),
+      appBarTheme: const AppBarTheme(centerTitle: true),
+      cardTheme: CardThemeData(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        elevation: 1,
+        margin: const EdgeInsets.symmetric(vertical: 5),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+        filled: true,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: store,
+      builder: (_, __) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title: appTitle,
+          theme: _theme(Brightness.light),
+          darkTheme: _theme(Brightness.dark),
+          themeMode: store.dark ? ThemeMode.dark : ThemeMode.light,
+          home: Directionality(
+            textDirection: TextDirection.rtl,
+            child: HomePage(store: store),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Logo & Home Component
+// -----------------------------------------------------------------------------
+
+class Logo extends StatelessWidget {
+  const Logo({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(colors: [emerald, mint]),
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: const [
+          BoxShadow(
+              blurRadius: 8, offset: Offset(0, 3), color: Color(0x22000000)),
+        ],
+      ),
+      child: const Text(
+        'DP',
+        style: TextStyle(
+            color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16),
+      ),
+    );
+  }
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key, required this.store});
+
+  final Store store;
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  String query = '';
+  // جعل التصفية الافتراضية 'debt' لإخفاء العملاء المسددين تلقائياً عند فتح القائمة
+  String filter = 'debt';
+
+  int taps = 0;
+  DateTime? lastTap;
+
+  void hiddenAdmin() {
+    final now = DateTime.now();
+
+    // Exactly three consecutive rapid taps. A pause of more than 700 ms
+    // breaks the sequence, so three taps spread over seconds cannot unlock it.
+    if (lastTap == null ||
+        now.difference(lastTap!).inMilliseconds > 700) {
+      taps = 0;
+    }
+
+    lastTap = now;
+    taps++;
+
+    if (taps == 3) {
+      taps = 0;
+      lastTap = null;
+      showDialog(
+        context: context,
+        builder: (_) => AdminGate(store: widget.store),
+      );
+    }
+  }
+
+  Future<void> refresh() async {
+    await widget.store.saveLocal();
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = widget.store;
+
+    final filtered = store.customers.where((customer) {
+      final balance = store.balance(customer.id);
+      final normalizedQuery = _digits(query);
+
+      final matchesSearch = query.isEmpty ||
+          customer.name.contains(query) ||
+          customer.phone.contains(query) ||
+          _digits(customer.phone).contains(normalizedQuery);
+
+      final matchesFilter = filter == 'all' ||
+          (filter == 'debt' && balance > 0) ||
+          (filter == 'paid' && balance <= 0);
+
+      return matchesSearch && matchesFilter;
+    }).toList()
+      ..sort((a, b) => store.balance(b.id).compareTo(store.balance(a.id)));
+
+    final total = store.customers.fold<int>(
+      0,
+      (sum, customer) => sum + max(0, store.balance(customer.id)),
+    );
+
+    return Scaffold(
+      appBar: AppBar(
+        leading: const Padding(padding: EdgeInsets.all(8), child: Logo()),
+        title: GestureDetector(
+          onTap: hiddenAdmin,
+          child: Text(store.shop,
+              style: const TextStyle(fontWeight: FontWeight.w900)),
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'المسودات الصوتية',
+            icon: const Icon(Icons.mic_rounded, color: emerald),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => VoiceDraftsPage(store: store)),
+              );
+            },
+          ),
+          if (store.syncing)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 8),
+              child: Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            ),
+          IconButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => SettingsPage(store: store)),
+              );
+            },
+            icon: const Icon(Icons.settings_outlined),
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: refresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(12),
+          children: [
+            if (!store.firebaseReady)
+              Card(
+                color: burgundy.withOpacity(.10),
+                child: ListTile(
+                  leading: const Icon(Icons.cloud_off, color: burgundy),
+                  title: const Text('Firebase غير متصل'),
+                  subtitle: const Text(
+                      'بيانات العملاء محفوظة محلياً. Firebase يُستخدم لحالة الحساب والتفعيل.'),
+                  trailing: IconButton(
+                    onPressed: store.connectFirebase,
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ),
+              ),
+            if (!store.activated)
+              Card(
+                color: emerald.withOpacity(.08),
+                child: ListTile(
+                  leading: const Icon(Icons.timer_outlined, color: emerald),
+                  title: Text(
+                    store.locked
+                        ? 'انتهت الفترة التجريبية'
+                        : 'الفترة التجريبية: ${store.trialDaysLeft} يوم',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    store.locked
+                        ? 'فعّل التطبيق لمواصلة تسجيل العمليات.'
+                        : 'يمكنك تفعيل التطبيق في أي وقت برمز تفعيل دائم.',
+                  ),
+                  trailing: TextButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ActivationPage(store: store),
+                        ),
+                      );
+                    },
+                    child: Text(store.locked ? 'تفعيل' : 'عرض'),
+                  ),
+                ),
+              ),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _Stat(
+                          title: 'إجمالي المتبقي',
+                          value: money(total),
+                          color: burgundy),
+                    ),
+                    Expanded(
+                      child: _Stat(
+                          title: 'العملاء عليهم دَين',
+                          value: '${filtered.length}',
+                          color: emerald),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (store.locked)
+              Card(
+                color: burgundy.withOpacity(.10),
+                child: ListTile(
+                  leading: const Icon(Icons.lock_outline, color: burgundy),
+                  title: const Text('انتهت التجربة',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: const Text('فعّل التطبيق لمواصلة تسجيل العمليات.'),
+                  trailing: TextButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => ActivationPage(store: store)),
+                      );
+                    },
+                    child: const Text('تفعيل'),
+                  ),
+                ),
+              ),
+            TextField(
+              decoration: const InputDecoration(
+                hintText: 'بحث بالاسم أو الهاتف',
+                prefixIcon: Icon(Icons.search),
+              ),
+              onChanged: (value) => setState(() => query = value.trim()),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: [
+                ChoiceChip(
+                  label: const Text('عليهم دَين'),
+                  selected: filter == 'debt',
+                  onSelected: (_) => setState(() => filter = 'debt'),
+                ),
+                ChoiceChip(
+                  label: const Text('مسدد'),
+                  selected: filter == 'paid',
+                  onSelected: (_) => setState(() => filter = 'paid'),
+                ),
+                ChoiceChip(
+                  label: const Text('الكل'),
+                  selected: filter == 'all',
+                  onSelected: (_) => setState(() => filter = 'all'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            if (filtered.isEmpty)
+              const Card(
+                child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: Text('لا توجد نتائج')),
+                ),
+              ),
+            ...filtered.map((customer) {
+              final customerBalance = store.balance(customer.id);
+              return Card(
+                child: ListTile(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            CustomerPage(store: store, customer: customer),
+                      ),
+                    );
+                  },
+                  leading: CircleAvatar(
+                    child: Text(
+                      customer.name.trim().isEmpty
+                          ? '؟'
+                          : customer.name.trim().characters.first,
+                    ),
+                  ),
+                  title: Text(customer.name,
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text(
+                    '${customer.phone}\n'
+                    '${store.risk(customer.id)} • '
+                    'دَين ${money(store.debts(customer.id))} • '
+                    'مسدد ${money(store.paid(customer.id))}',
+                  ),
+                  isThreeLine: true,
+                  trailing: Text(
+                    money(customerBalance),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      color: customerBalance > 0 ? burgundy : mint,
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: store.locked
+            ? () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => ActivationPage(store: store)),
+                );
+              }
+            : () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => AddCustomerPage(store: store)),
+                );
+              },
+        icon: Icon(store.locked ? Icons.lock : Icons.person_add_alt_1),
+        label: Text(store.locked ? 'التفعيل' : 'عميل جديد'),
+      ),
+    );
+  }
+}
+
+class _Stat extends StatelessWidget {
+  const _Stat({required this.title, required this.value, required this.color});
+
+  final String title;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text(title),
+        Text(
+          value,
+          style: TextStyle(
+              fontSize: 20, fontWeight: FontWeight.w900, color: color),
+        ),
+      ],
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Form, Customer, Transactions, Voice & Admin Pages
+// -----------------------------------------------------------------------------
+
+class PageForm extends StatelessWidget {
+  const PageForm({super.key, required this.title, required this.children});
+
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(title)),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: children
+            .map((widget) => Padding(
+                padding: const EdgeInsets.only(bottom: 12), child: widget))
+            .toList(),
+      ),
+    );
+  }
+}
+
+class AddCustomerPage extends StatefulWidget {
+  const AddCustomerPage({super.key, required this.store});
+
+  final Store store;
+
+  @override
+  State<AddCustomerPage> createState() => _AddCustomerPageState();
+}
+
+class _AddCustomerPageState extends State<AddCustomerPage> {
+  final name = TextEditingController();
+  final phone = TextEditingController();
+  final limit = TextEditingController();
+  bool busy = false;
+
+  @override
+  void dispose() {
+    name.dispose();
+    phone.dispose();
+    limit.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    if (busy) return;
+
+    final customerName = name.text.trim();
+    if (customerName.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('أدخل اسم العميل')),
+      );
+      return;
+    }
+
+    setState(() => busy = true);
+
+    final ok = await widget.store.saveCustomer(
+      Customer(
+        id: makeId(),
+        name: customerName,
+        phone: phone.text.trim(),
+        limitCents: parseCents(limit.text),
+      ),
+    );
+
+    if (!mounted) return;
+    setState(() => busy = false);
+
+    if (ok) {
+      Navigator.pop(context);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('العميل موجود مسبقاً بنفس الاسم والهاتف')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PageForm(
+      title: 'إضافة عميل',
+      children: [
+        TextField(
+          controller: name,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(labelText: 'اسم العميل'),
+        ),
+        TextField(
+          controller: phone,
+          keyboardType: TextInputType.phone,
+          decoration: const InputDecoration(labelText: 'رقم الهاتف'),
+        ),
+        TextField(
+          controller: limit,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration:
+              const InputDecoration(labelText: 'السقف الائتماني اختياري'),
+        ),
+        FilledButton(
+          onPressed: busy ? null : save,
+          child: Text(busy ? 'جارٍ الحفظ...' : 'حفظ العميل'),
+        ),
+      ],
+    );
+  }
+}
+
+class CustomerPage extends StatelessWidget {
+  const CustomerPage({super.key, required this.store, required this.customer});
+
+  final Store store;
+  final Customer customer;
+
+  Future<void> openWhatsApp(BuildContext context) async {
+    final text = store.whatsappMessage
+        .replaceAll('[الاسم]', customer.name)
+        .replaceAll('[المبلغ]', money(store.balance(customer.id)));
+
+    final ok = await launchWhatsApp(customer.phone, text);
+
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تعذر فتح واتساب')),
+      );
+    }
+  }
+
+  Future<void> deleteCustomer(BuildContext context) async {
+    final balance = store.balance(customer.id);
+    final credit = store.prepaidCredit(customer.id);
+    if (balance != 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content:
+                Text('لا يمكن حذف العميل. المتبقي عليه ${money(balance)}')),
+      );
+      return;
+    }
+    if (credit != 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'لا يمكن حذف العميل. لديه رصيد مسبق ${money(credit)} محفوظ للمشتريات القادمة.',
+          ),
+        ),
+      );
+      return;
+    }
+    // The local zero-balance ledger is authoritative. Cloud deletion is queued
+    // and retried automatically, so a temporary Firebase problem does not
+    // block the customer from being removed from the local ledger.
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('حذف العميل؟'),
+        content: const Text(
+            'سيتم حذف العميل وعملياته لأن رصيده المحلي صفر. وسيتم مزامنة الحذف مع Firebase تلقائياً.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('إلغاء')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: burgundy),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('حذف نهائي'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    final ok = await store.deleteCustomer(customer);
+    if (!context.mounted) return;
+    if (ok) {
+      Navigator.pop(context);
+    } else {
+      final reason = store.lastDeleteError.trim().isNotEmpty
+          ? store.lastDeleteError
+          : 'تعذر حذف العميل. لم يتم تغيير البيانات.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(reason)),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = store.transactions
+        .where((t) => t.customerId == customer.id)
+        .toList()
+      ..sort((a, b) => b.date.compareTo(a.date));
+
+    return Scaffold(
+      appBar: AppBar(title: Text(customer.name)),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                children: [
+                  const Icon(Icons.account_balance_wallet_rounded,
+                      size: 36, color: emerald),
+                  Text(
+                    money(store.prepaidCredit(customer.id) > 0
+                        ? store.prepaidCredit(customer.id)
+                        : store.balance(customer.id)),
+                    style: const TextStyle(
+                        fontSize: 30, fontWeight: FontWeight.w900),
+                  ),
+                  Text(
+                    store.prepaidCredit(customer.id) > 0
+                        ? 'رصيد دائن لصالح العميل'
+                        : 'الدَين المتبقي • ${money(store.balance(customer.id))}',
+                  ),
+                  Text(
+                    'إجمالي الديون ${money(store.debts(customer.id))} • '
+                    'المسدد ${money(store.paid(customer.id))}',
+                  ),
+                  if (store.prepaidCredit(customer.id) > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        'رصيد مسبق ${money(store.prepaidCredit(customer.id))} '
+                        'متاح للعمليات القادمة',
+                        style: const TextStyle(
+                          color: emerald,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: () => openWhatsApp(context),
+                        icon: const Icon(Icons.chat_rounded),
+                        label: const Text('واتساب'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => AccountStatementPage(
+                                store: store,
+                                customer: customer,
+                              ),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.receipt_long_rounded),
+                        label: const Text('كشف الحساب'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          final ok = await makePhoneCall(customer.phone);
+                          if (!ok && context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('تعذر إجراء الاتصال')),
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.phone_rounded),
+                        label: const Text('اتصال'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => deleteCustomer(context),
+                        icon: const Icon(Icons.delete_forever_rounded,
+                            color: burgundy),
+                        label: const Text('حذف العميل'),
+                        style:
+                            OutlinedButton.styleFrom(foregroundColor: burgundy),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (rows.isEmpty)
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: Text('لا توجد عمليات بعد')),
+              ),
+            ),
+          ...rows.map(
+            (transaction) => Card(
+              child: ListTile(
+                leading: Icon(
+                  transaction.type == 'debt'
+                      ? Icons.arrow_downward_rounded
+                      : Icons.arrow_upward_rounded,
+                  color: transaction.type == 'debt' ? burgundy : mint,
+                ),
+                title: Text(transaction.type == 'debt' ? 'دَين' : 'تسديد'),
+                subtitle: Text(
+                  '${dateText(transaction.date)} ${timeText(transaction.date)}'
+                  '${transaction.note.isEmpty ? '' : ' • ${transaction.note}'}',
+                ),
+                trailing: Text(
+                  money(transaction.amountCents),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    color: transaction.type == 'debt' ? burgundy : mint,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: store.locked
+            ? () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => ActivationPage(store: store)),
+                );
+              }
+            : () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        AddTransactionPage(store: store, customer: customer),
+                  ),
+                );
+              },
+        icon: Icon(store.locked ? Icons.lock : Icons.swap_horiz_rounded),
+        label: Text(store.locked ? 'التفعيل' : 'عملية جديدة'),
+      ),
+    );
+  }
+}
+
+class AccountStatementPage extends StatelessWidget {
+  const AccountStatementPage({
+    super.key,
+    required this.store,
+    required this.customer,
+  });
+
+  final Store store;
+  final Customer customer;
+
+  Future<void> copyStatement(BuildContext context) async {
+    final text = buildAccountStatement(store, customer);
+    await Clipboard.setData(ClipboardData(text: text));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تم نسخ كشف الحساب')),
+      );
+    }
+  }
+
+  Future<void> sendStatement(BuildContext context) async {
+    final text = buildAccountStatement(store, customer);
+    final ok = await launchWhatsApp(customer.phone, text);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تعذر فتح واتساب')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final statement = buildAccountStatement(store, customer);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('كشف الحساب'),
+        actions: [
+          IconButton(
+            tooltip: 'نسخ الكشف',
+            onPressed: () => copyStatement(context),
+            icon: const Icon(Icons.copy_all_rounded),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: SelectableText(
+                statement,
+                textDirection: TextDirection.rtl,
+                style: const TextStyle(
+                  fontSize: 15,
+                  height: 1.7,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: () => sendStatement(context),
+            icon: const Icon(Icons.send_rounded),
+            label: const Text('إرسال الكشف للزبون عبر واتساب'),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => copyStatement(context),
+            icon: const Icon(Icons.content_copy_rounded),
+            label: const Text('نسخ كشف الحساب'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AddTransactionPage extends StatefulWidget {
+  const AddTransactionPage(
+      {super.key, required this.store, required this.customer});
+
+  final Store store;
+  final Customer customer;
+
+  @override
+  State<AddTransactionPage> createState() => _AddTransactionPageState();
+}
+
+class _AddTransactionPageState extends State<AddTransactionPage> {
+  final amount = TextEditingController();
+  final note = TextEditingController();
+  String type = 'debt';
+  bool busy = false;
+
+  @override
+  void dispose() {
+    amount.dispose();
+    note.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    if (busy) return;
+
+    final cents = parseCents(amount.text);
+    final current = widget.store.balance(widget.customer.id);
+
+    if (cents <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('أدخل مبلغاً صحيحاً أكبر من صفر')),
+      );
+      return;
+    }
+
+    // A payment may exceed the current debt. The excess becomes prepaid
+    // credit and is automatically applied to future debts.
+
+    if (type == 'debt' &&
+        widget.customer.limitCents > 0 &&
+        current + cents > widget.customer.limitCents) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('العملية تتجاوز السقف الائتماني')),
+      );
+      return;
+    }
+
+    setState(() => busy = true);
+
+    final saved = await widget.store.saveTx(
+      Tx(
+        id: makeId(),
+        customerId: widget.customer.id,
+        type: type,
+        amountCents: cents,
+        date: DateTime.now(),
+        note: note.text.trim(),
+      ),
+    );
+
+    if (!mounted) return;
+    setState(() => busy = false);
+
+    if (saved) {
+      Navigator.pop(context);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PageForm(
+      title: type == 'debt' ? 'إضافة دَين' : 'تسجيل تسديد',
+      children: [
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(
+                value: 'debt',
+                label: Text('دَين'),
+                icon: Icon(Icons.arrow_downward)),
+            ButtonSegment(
+                value: 'payment',
+                label: Text('تسديد'),
+                icon: Icon(Icons.arrow_upward)),
+          ],
+          selected: {type},
+          onSelectionChanged: (values) {
+            if (values.isEmpty) return;
+            setState(() => type = values.first);
+          },
+        ),
+        TextField(
+          controller: amount,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+              labelText: 'المبلغ', hintText: 'مثال: 150 أو 150.50'),
+        ),
+        TextField(
+          controller: note,
+          decoration: const InputDecoration(labelText: 'البيان / الملاحظات'),
+        ),
+        FilledButton(
+          onPressed: busy ? null : save,
+          child: Text(busy ? 'جارٍ الحفظ...' : 'حفظ العملية'),
+        ),
+      ],
+    );
+  }
+}
+
+class VoiceDraftsPage extends StatefulWidget {
+  const VoiceDraftsPage({super.key, required this.store});
+
+  final Store store;
+
+  @override
+  State<VoiceDraftsPage> createState() => _VoiceDraftsPageState();
+}
+
+class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
+  final speech = stt.SpeechToText();
+  bool listening = false;
+  bool initializing = false;
+  String live = '';
+
+  int? amountCentsFromText(String text) {
+    final normalized = _digits(text);
+    final match = RegExp(r'(\d+(?:[.,]\d+)?)').firstMatch(normalized);
+
+    if (match != null) {
+      return parseCents(match.group(1)!);
+    }
+
+    const words = {
+      'مائة': 100,
+      'مئة': 100,
+      'مية': 100,
+      'ألف': 1000,
+      'الف': 1000,
+      'عشرة': 10,
+      'عشرين': 20,
+      'ثلاثين': 30,
+      'أربعين': 40,
+      'خمسين': 50,
+      'ستين': 60,
+      'سبعين': 70,
+      'ثمانين': 80,
+      'تسعين': 90,
+    };
+
+    for (final entry in words.entries) {
+      if (text.contains(entry.key)) {
+        return entry.value * 100;
+      }
+    }
+
+    return null;
+  }
+
+  String findCustomer(String text) {
+    for (final customer in widget.store.customers) {
+      if (text.contains(customer.name)) {
+        return customer.id;
+      }
+    }
+    return '';
+  }
+
+  Future<bool> _ensureMicrophonePermission() async {
+    var status = await Permission.microphone.status;
+    if (status.isGranted) return true;
+
+    status = await Permission.microphone.request();
+    if (status.isGranted) return true;
+
+    if (status.isPermanentlyDenied && mounted) {
+      await showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('صلاحية الميكروفون'),
+          content: const Text(
+            'التسجيل الصوتي يحتاج صلاحية الميكروفون. افتح إعدادات التطبيق وفعّل الميكروفون ثم عد إلى DainPay.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                await openAppSettings();
+              },
+              child: const Text('فتح الإعدادات'),
+            ),
+          ],
+        ),
+      );
+    } else if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('يلزم السماح للميكروفون لاستخدام التسجيل الصوتي.')),
+      );
+    }
+    return false;
+  }
+
+  Future<void> record() async {
+    if (initializing) return;
+
+    if (listening) {
+      try {
+        await speech.stop();
+      } catch (_) {}
+      if (mounted) setState(() => listening = false);
+      return;
+    }
+
+    initializing = true;
+
+    try {
+      if (!await _ensureMicrophonePermission()) return;
+      await speech.cancel();
+      final available = await speech.initialize(
+        debugLogging: false,
+        onStatus: (status) {
+          if (!mounted) return;
+          if (status == 'notListening' || status == 'done') {
+            setState(() => listening = false);
+          }
+        },
+        onError: (error) {
+          debugPrint('Speech error: $error');
+          if (!mounted) return;
+          setState(() => listening = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'تعذر تشغيل التعرف الصوتي. تحقق من الميكروفون وخدمة التعرف الصوتي.',
+              ),
+            ),
+          );
+        },
+      );
+
+      if (!available) {
+        if (mounted) {
+          await showDialog<void>(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text('التعرف الصوتي غير متاح'),
+              content: const Text(
+                'لم يتمكن DainPay من تشغيل خدمة التعرف الصوتي. '
+                'تأكد من منح الميكروفون صلاحية الاستخدام وأن خدمة التعرف الصوتي في الهاتف مفعلة، ثم أعد المحاولة.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('إغلاق'),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    Navigator.pop(context);
+                    await openAppSettings();
+                  },
+                  child: const Text('إعدادات التطبيق'),
+                ),
+              ],
+            ),
+          );
+        }
+        return;
+      }
+
+      if (!mounted) return;
+
+      final locales = await speech.locales();
+      String? arabicLocale;
+      for (final locale in locales) {
+        if (locale.localeId.toLowerCase() == 'ar-ly') {
+          arabicLocale = locale.localeId;
+          break;
+        }
+      }
+      arabicLocale ??= locales
+          .where((locale) => locale.localeId.toLowerCase().startsWith('ar-'))
+          .map((locale) => locale.localeId)
+          .firstOrNull;
+
+      setState(() => listening = true);
+
+      await speech.listen(
+        listenOptions: stt.SpeechListenOptions(
+          localeId: arabicLocale ?? 'ar-LY',
+          partialResults: true,
+          cancelOnError: true,
+        ),
+        onResult: (result) async {
+          if (!mounted) return;
+          setState(() => live = result.recognizedWords);
+
+          if (!result.finalResult) return;
+
+          final text = result.recognizedWords.trim();
+          if (text.isNotEmpty) {
+            widget.store.voiceDrafts.insert(
+              0,
+              VoiceDraft(
+                id: makeId(),
+                text: text,
+                date: DateTime.now(),
+                customerId: findCustomer(text),
+                amountCents: amountCentsFromText(text) ?? 0,
+                note: text,
+              ),
+            );
+            await widget.store.saveLocal();
+            widget.store.safeNotify();
+          }
+
+          if (mounted) setState(() => listening = false);
+        },
+      );
+    } catch (e) {
+      debugPrint('Speech start error: $e');
+      if (mounted) {
+        setState(() => listening = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'تعذر تشغيل التعرف الصوتي. تحقق من صلاحية الميكروفون '
+              'وخدمة التعرف الصوتي في الهاتف.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      initializing = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    try {
+      speech.stop();
+    } catch (_) {}
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final drafts = widget.store.voiceDrafts;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('المسودات الصوتية')),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Card(
+            child: ListTile(
+              onTap: record,
+              leading: Icon(
+                listening ? Icons.stop_circle : Icons.mic_rounded,
+                color: listening ? burgundy : emerald,
+              ),
+              title: Text(listening ? 'جارٍ الاستماع...' : 'تسجيل عملية صوتية'),
+              subtitle: Text(live.isEmpty ? 'مثال: محمد 150 بضاعة' : live),
+            ),
+          ),
+          if (drafts.isEmpty)
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: Text('لا توجد مسودات صوتية')),
+              ),
+            ),
+          ...drafts.map((draft) {
+            final customer = widget.store.customers
+                .where((c) => c.id == draft.customerId)
+                .firstOrNull;
+            return Dismissible(
+              key: Key(draft.id),
+              direction: DismissDirection.endToStart,
+              background: Container(
+                color: burgundy,
+                alignment: Alignment.centerLeft,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: const Icon(Icons.delete_forever, color: Colors.white),
+              ),
+              onDismissed: (_) async {
+                await widget.store.deleteVoiceDraft(draft.id);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('تم حذف المسودة الصوتية')),
+                );
+              },
+              child: Card(
+                child: ListTile(
+                  title: Text(customer?.name ?? 'عميل غير محدد'),
+                  subtitle: Text(
+                      '${draft.text}\nالمبلغ: ${money(draft.amountCents)}'),
+                  isThreeLine: true,
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline, color: burgundy),
+                    onPressed: () async {
+                      await widget.store.deleteVoiceDraft(draft.id);
+                      setState(() {});
+                    },
+                  ),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            VoiceReviewPage(store: widget.store, draft: draft),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: record,
+        child: Icon(listening ? Icons.stop : Icons.mic),
+      ),
+    );
+  }
+}
+
+class VoiceReviewPage extends StatefulWidget {
+  const VoiceReviewPage({super.key, required this.store, required this.draft});
+
+  final Store store;
+  final VoiceDraft draft;
+
+  @override
+  State<VoiceReviewPage> createState() => _VoiceReviewPageState();
+}
+
+class _VoiceReviewPageState extends State<VoiceReviewPage> {
+  late final TextEditingController amount;
+  late final TextEditingController note;
+  String customerId = '';
+  String type = 'debt';
+  bool busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    amount = TextEditingController(
+      text: widget.draft.amountCents > 0
+          ? '${widget.draft.amountCents ~/ 100}.${(widget.draft.amountCents % 100).toString().padLeft(2, '0')}'
+          : '',
+    );
+    note = TextEditingController(text: widget.draft.note);
+    customerId = widget.draft.customerId;
+  }
+
+  @override
+  void dispose() {
+    amount.dispose();
+    note.dispose();
+    super.dispose();
+  }
+
+  Future<void> approve() async {
+    if (busy) return;
+
+    final cents = parseCents(amount.text);
+    final customer =
+        widget.store.customers.where((c) => c.id == customerId).firstOrNull;
+
+    if (customer == null || cents <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('اختر العميل وأدخل مبلغاً صحيحاً')),
+      );
+      return;
+    }
+
+    final current = widget.store.balance(customer.id);
+
+    // A payment may exceed the current debt. The excess becomes prepaid
+    // credit and is automatically applied to future debts.
+
+    if (type == 'debt' &&
+        customer.limitCents > 0 &&
+        current + cents > customer.limitCents) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('العملية تتجاوز السقف الائتماني')),
+      );
+      return;
+    }
+
+    setState(() => busy = true);
+
+    final saved = await widget.store.saveTx(
+      Tx(
+        id: makeId(),
+        customerId: customer.id,
+        type: type,
+        amountCents: cents,
+        date: DateTime.now(),
+        note: note.text.trim(),
+      ),
+    );
+
+    if (!saved) {
+      if (mounted) setState(() => busy = false);
+      return;
+    }
+
+    widget.store.voiceDrafts
+        .removeWhere((draft) => draft.id == widget.draft.id);
+    await widget.store.saveLocal();
+
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final validId = widget.store.customers.any((c) => c.id == customerId)
+        ? customerId
+        : null;
+
+    return PageForm(
+      title: 'مراجعة التسجيل الصوتي',
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Text(
+              widget.draft.text,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ),
+        DropdownButtonFormField<String>(
+          value: validId,
+          decoration: const InputDecoration(labelText: 'العميل'),
+          items: widget.store.customers
+              .map((customer) => DropdownMenuItem(
+                  value: customer.id, child: Text(customer.name)))
+              .toList(),
+          onChanged: (value) => setState(() => customerId = value ?? ''),
+        ),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'debt', label: Text('دَين')),
+            ButtonSegment(value: 'payment', label: Text('تسديد')),
+          ],
+          selected: {type},
+          onSelectionChanged: (values) {
+            if (values.isEmpty) return;
+            setState(() => type = values.first);
+          },
+        ),
+        TextField(
+          controller: amount,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(labelText: 'المبلغ'),
+        ),
+        TextField(
+          controller: note,
+          maxLines: 2,
+          decoration: const InputDecoration(labelText: 'البيان'),
+        ),
+        FilledButton(
+          onPressed: busy ? null : approve,
+          child: Text(busy ? 'جارٍ الاعتماد...' : 'اعتماد وحفظ'),
+        ),
+      ],
+    );
+  }
+}
+
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key, required this.store});
+
+  final Store store;
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  late final TextEditingController shop;
+  late final TextEditingController message;
+  bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    shop = TextEditingController(text: widget.store.shop);
+    message = TextEditingController(text: widget.store.whatsappMessage);
+  }
+
+  @override
+  void dispose() {
+    shop.dispose();
+    message.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    if (saving) return;
+
+    setState(() => saving = true);
+
+    widget.store.shop = shop.text.trim().isEmpty ? appTitle : shop.text.trim();
+    widget.store.whatsappMessage = message.text.trim().isEmpty
+        ? 'السلام عليكم [الاسم]، تذكير لطيف بخصوص المتبقي عليكم قدره [المبلغ].'
+        : message.text.trim();
+
+    await widget.store.save();
+
+    if (!mounted) return;
+    setState(() => saving = false);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('تم حفظ الإعدادات')),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = widget.store;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('الإعدادات')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          TextField(
+            controller: shop,
+            decoration: const InputDecoration(labelText: 'اسم المحل / النشاط'),
+          ),
+          SwitchListTile(
+            value: store.dark,
+            onChanged: (value) {
+              // Notify MaterialApp immediately so the theme changes without
+              // waiting for disk writes or the background encrypted backup.
+              setState(() => store.dark = value);
+              store.safeNotify();
+              unawaited(store.saveLocal());
+            },
+            title: const Text('الوضع الداكن'),
+          ),
+          TextField(
+            controller: message,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'قالب رسالة واتساب',
+              helperText: 'يمكنك استخدام [الاسم] و [المبلغ]',
+            ),
+          ),
+          ListTile(
+            title: const Text('رقم الجهاز'),
+            subtitle: SelectableText(store.deviceId),
+          ),
+          ListTile(
+            title: const Text('حالة Firebase'),
+            subtitle: Text(store.firebaseReady ? 'متصل' : 'غير متصل'),
+            trailing: Icon(
+              store.firebaseReady ? Icons.cloud_done : Icons.cloud_off,
+              color: store.firebaseReady ? mint : burgundy,
+            ),
+          ),
+          FilledButton(
+            onPressed: saving ? null : save,
+            child: Text(saving ? 'جارٍ الحفظ...' : 'حفظ'),
+          ),
+          OutlinedButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => VoiceDraftsPage(store: store)),
+              );
+            },
+            child: const Text('المسودات الصوتية'),
+          ),
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.cloud_sync_rounded),
+                  title: const Text('النسخة الاحتياطية الآمنة'),
+                  subtitle: Text(
+                    store.backupGoogleEmail.isEmpty
+                        ? 'نسخة محلية مشفرة تلقائياً + نسخة Google Drive للحساب الذي تختاره.'
+                        : 'حساب Google للنسخة: ${store.backupGoogleEmail}',
+                  ),
+                ),
+                if (store.lastLocalBackupAt != null)
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.phone_android_rounded),
+                    title: const Text('آخر نسخة محلية تلقائية'),
+                    subtitle: Text(
+                      '${dateText(store.lastLocalBackupAt!)} ${timeText(store.lastLocalBackupAt!)}',
+                    ),
+                  ),
+                if (store.lastBackupAt != null)
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.history_rounded),
+                    title: const Text('آخر نسخة Google Drive ناجحة'),
+                    subtitle: Text(
+                      '${dateText(store.lastBackupAt!)} ${timeText(store.lastBackupAt!)}',
+                    ),
+                  ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final result = await store.createLocalBackupNow();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(result.message)),
+                    );
+                  },
+                  icon: const Icon(Icons.phone_android_rounded),
+                  label: const Text('إنشاء / تحديث النسخة المحلية'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final result = await store.backupToGoogleDrive();
+                    if (!context.mounted) return;
+                    if (result.success) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(result.message)),
+                      );
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(result.message)),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.cloud_upload_rounded),
+                  label: const Text('إنشاء / تحديث نسخة Google Drive'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final result = await store.restoreFromGoogleDrive();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(result.message)),
+                    );
+                  },
+                  icon: const Icon(Icons.cloud_download_rounded),
+                  label: const Text('استعادة البيانات من Google Drive'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final result = await store.restoreFromLocalBackup();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(result.message)),
+                    );
+                  },
+                  icon: const Icon(Icons.phone_android_rounded),
+                  label: const Text('استعادة من النسخة المحلية'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    await store.changeGoogleBackupAccount();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'تم تسجيل الخروج من حساب Google. عند النسخ القادم اختر حساب العميل.',
+                        ),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.switch_account_rounded),
+                  label: const Text('تغيير حساب Google للنسخ الاحتياطي'),
+                ),
+              ],
+            ),
+          ),
+          OutlinedButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => ActivationPage(store: store)),
+              );
+            },
+            child: const Text('التفعيل'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ActivationPage extends StatefulWidget {
+  const ActivationPage({super.key, required this.store});
+
+  final Store store;
+
+  @override
+  State<ActivationPage> createState() => _ActivationPageState();
+}
+
+class _ActivationPageState extends State<ActivationPage> {
+  final code = TextEditingController();
+  bool busy = false;
+
+  @override
+  void dispose() {
+    code.dispose();
+    super.dispose();
+  }
+
+  Future<void> activate() async {
+    if (busy) return;
+
+    if (!widget.store.firebaseReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                'لا يوجد اتصال بالخدمة حالياً. حاول بعد الاتصال بالإنترنت.')),
+      );
+      return;
+    }
+
+    final entered = code.text.trim();
+    if (entered.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('أدخل كود التفعيل')),
+      );
+      return;
+    }
+
+    setState(() => busy = true);
+    final ok = await widget.store.activateCode(entered);
+
+    if (!mounted) return;
+    setState(() => busy = false);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok ? 'تم التفعيل الدائم بنجاح' : 'الكود غير صحيح أو مستخدم',
+        ),
+      ),
+    );
+
+    if (ok) {
+      Navigator.pop(context);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = widget.store;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('التفعيل')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  const Icon(Icons.verified_rounded, size: 42, color: mint),
+                  const SizedBox(height: 8),
+                  Text(
+                    store.activated
+                        ? 'التطبيق مفعّل بصفة دائمة'
+                        : 'المتبقي من التجربة: ${store.trialDaysLeft} أيام',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          ),
+          TextField(
+            controller: code,
+            keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.done,
+            decoration: const InputDecoration(labelText: 'كود التفعيل'),
+            onSubmitted: (_) => activate(),
+          ),
+          const SizedBox(height: 12),
+          FilledButton(
+            onPressed: busy ? null : activate,
+            child: Text(busy ? 'جارٍ التحقق...' : 'تفعيل دائم'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AdminGate extends StatefulWidget {
+  const AdminGate({super.key, required this.store});
+
+  final Store store;
+
+  @override
+  State<AdminGate> createState() => _AdminGateState();
+}
+
+class _AdminGateState extends State<AdminGate> {
+  final pin = TextEditingController();
+  bool busy = false;
+
+  @override
+  void dispose() {
+    pin.dispose();
+    super.dispose();
+  }
+
+  Future<void> enter() async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      final valid = await widget.store.verifyOwnerPin(pin.text);
+      if (!mounted) return;
+      if (valid) {
+        Navigator.of(context).pop();
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => AdminPage(store: widget.store)),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('رمز المالك غير صحيح')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('لوحة المالك'),
+      content: TextField(
+        controller: pin,
+        obscureText: true,
+        keyboardType: TextInputType.number,
+        onSubmitted: (_) => enter(),
+        decoration: const InputDecoration(labelText: 'رمز المالك'),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('إلغاء'),
+        ),
+        FilledButton(
+          onPressed: busy ? null : enter,
+          child: busy
+              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('دخول'),
+        ),
+      ],
+    );
+  }
+}
+
+class AdminPage extends StatefulWidget {
+  const AdminPage({super.key, required this.store});
+
+  final Store store;
+
+  @override
+  State<AdminPage> createState() => _AdminPageState();
+}
+
+class _AdminPageState extends State<AdminPage> {
+  String result = '';
+  bool busy = false;
+
+  @override
+  void dispose() {
+    super.dispose();
+  }
+
+  Future<void> generate() async {
+    if (busy) return;
+
+    if (!widget.store.firebaseReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Firebase غير متصل')),
+      );
+      return;
+    }
+
+    setState(() => busy = true);
+    String? generated;
+    try {
+      generated = await widget.store.generateCode();
+    } on FirebaseException catch (e) {
+      generated = 'Firebase ${e.code}: ${e.message ?? ''}'.trim();
+    } catch (e) {
+      generated = e is StateError
+          ? e.message
+          : 'تعذر توليد رمز التفعيل حالياً.';
+    }
+
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+      result = generated ?? 'تعذر توليد الرمز';
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = widget.store;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('إدارة التفعيل')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.admin_panel_settings_outlined),
+              title: const Text('وضع المالك'),
+              subtitle: Text(store.firebaseReady
+                  ? 'متصل بـ Firebase'
+                  : 'غير متصل بـ Firebase'),
+            ),
+          ),
+          const Card(
+            child: ListTile(
+              leading: Icon(Icons.vpn_key_rounded),
+              title: Text('رمز دائم لمرة واحدة'),
+              subtitle:
+                  Text('الرمز غير مرتبط بالهاتف ويمكن استخدامه مرة واحدة فقط.'),
+            ),
+          ),
+          FilledButton(
+            onPressed: busy ? null : generate,
+            child: Text(busy ? 'جارٍ التوليد...' : 'توليد رمز تفعيل'),
+          ),
+          if (result.isNotEmpty)
+            Card(
+              child: ListTile(
+                title: const Text('رمز التفعيل'),
+                subtitle: SelectableText(
+                  result,
+                  style: const TextStyle(
+                      fontSize: 25, fontWeight: FontWeight.w900),
+                ),
+                trailing: result.length == 6
+                    ? IconButton(
+                        onPressed: () {
+                          launchWhatsApp(
+                            '+218934951072',
+                            'رمز تفعيل DainPay: $result',
+                          );
+                        },
+                        icon: const Icon(Icons.send),
+                      )
+                    : null,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+extension FirstOrNullExtension<T> on Iterable<T> {
+  T? get firstOrNull => isEmpty ? null : first;
+}
+).hasMatch(normalizedPin)) return false;
+    try {
+      final callable = FirebaseFunctions.instanceFor(region: functionsRegion)
+          .httpsCallable('verifyOwnerPin');
+      final result = await callable.call({'adminPin': normalizedPin});
+      final data = result.data;
+      if (data is Map && data['success'] == true) {
+        ownerPinSession = normalizedPin;
+        isAdmin = true;
+        safeNotify();
+        return true;
+      }
+      return false;
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('Owner verification failed: ${e.code}');
+      if (e.code == 'permission-denied') return false;
+      throw StateError('تعذر التحقق من رمز المالك حالياً (${e.code}).');
+    }
+  }
+
   Future<String?> generateCode() async {
-    if (!firebaseReady || !isAdmin || uid.isEmpty) {
+    if (!firebaseReady || !isAdmin || ownerPinSession.isEmpty || uid.isEmpty) {
       throw StateError('تعذر الاتصال بحساب المالك في Firebase.');
     }
 

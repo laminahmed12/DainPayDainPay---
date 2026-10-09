@@ -23,6 +23,7 @@ const Color burgundy = Color(0xFFE63946);
 const int trialLengthDays = 7;
 const String adminPin = '116936';
 const String appTitle = 'DainPay — دَيْن';
+const String functionsRegion = 'us-central1';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -441,6 +442,7 @@ class Store extends ChangeNotifier {
   String backupGoogleEmail = '';
   final Set<String> pendingDeletedCustomerIds = <String>{};
   final FlutterSecureStorage secureStorage = const FlutterSecureStorage();
+  Timer? _localBackupTimer;
 
   bool _disposed = false;
   bool _syncQueued = false;
@@ -539,6 +541,7 @@ class Store extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _localBackupTimer?.cancel();
     backupService.dispose();
     super.dispose();
   }
@@ -661,6 +664,8 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> saveLocal() async {
+    // Keep the interactive save path fast: only persist the primary local data
+    // here. The encrypted redundant snapshot is queued in the background.
     await _pref(() => prefs.setString(
         'customers', jsonEncode(customers.map((e) => e.toJson()).toList())));
     await _pref(() => prefs.setString('transactions',
@@ -676,23 +681,61 @@ class Store extends ChangeNotifier {
           pendingDeletedCustomerIds.toList(),
         ));
 
-    // Redundant encrypted local snapshot. This runs on every local save so
-    // a damaged SharedPreferences record does not destroy the only copy.
+    _queueEncryptedLocalBackup();
+  }
+
+  void _queueEncryptedLocalBackup() {
+    _localBackupTimer?.cancel();
+    _localBackupTimer = Timer(const Duration(milliseconds: 1200), () async {
+      try {
+        final localKey = await ensureLocalBackupKey();
+        final ok = await backupService.saveLocal(
+          payload: backupPayload(),
+          localKey: localKey,
+        );
+        if (ok) {
+          lastLocalBackupAt = DateTime.now();
+          await _pref(() => prefs.setString(
+                'last_local_backup_at',
+                lastLocalBackupAt!.toIso8601String(),
+              ));
+          safeNotify();
+        }
+      } catch (e) {
+        debugPrint('Background local backup error: $e');
+      }
+    });
+  }
+
+  Future<DainPayBackupResult> createLocalBackupNow() async {
     try {
       final localKey = await ensureLocalBackupKey();
       final ok = await backupService.saveLocal(
         payload: backupPayload(),
         localKey: localKey,
       );
-      if (ok) {
-        lastLocalBackupAt = DateTime.now();
-        await _pref(() => prefs.setString(
-              'last_local_backup_at',
-              lastLocalBackupAt!.toIso8601String(),
-            ));
+      if (!ok) {
+        return const DainPayBackupResult(
+          success: false,
+          message: 'تعذر إنشاء النسخة المحلية.',
+        );
       }
+      lastLocalBackupAt = DateTime.now();
+      await _pref(() => prefs.setString(
+            'last_local_backup_at',
+            lastLocalBackupAt!.toIso8601String(),
+          ));
+      safeNotify();
+      return const DainPayBackupResult(
+        success: true,
+        message: 'تم إنشاء النسخة المحلية المشفرة بنجاح.',
+        localSaved: true,
+      );
     } catch (e) {
-      debugPrint('Automatic local backup error: $e');
+      return DainPayBackupResult(
+        success: false,
+        message: 'تعذر إنشاء النسخة المحلية: $e',
+      );
     }
   }
 
@@ -858,13 +901,14 @@ class Store extends ChangeNotifier {
 
   Future<DainPayBackupResult> restoreFromLocalBackup() async {
     try {
+      _localBackupTimer?.cancel();
       final localKey = localBackupKey.trim().isNotEmpty
           ? localBackupKey
           : await secureStorage.read(key: 'dainpay_local_backup_key');
       if (localKey == null || localKey.trim().isEmpty) {
         return const DainPayBackupResult(
           success: false,
-          message: 'مفتاح النسخة المحلية غير موجود. استخدم استعادة Google Drive بالحساب نفسه.',
+          message: 'مفتاح النسخة المحلية غير موجود على هذا الجهاز.',
         );
       }
       final payload = await backupService.restoreLocal(localKey: localKey);
@@ -873,7 +917,7 @@ class Store extends ChangeNotifier {
       debugPrint('Local restore error: $e');
       return const DainPayBackupResult(
         success: false,
-        message: 'لا توجد نسخة محلية سليمة على هذا الجهاز. يمكنك اختيار حساب Google نفسه لاستعادة النسخة السحابية.',
+        message: 'لا توجد نسخة محلية سليمة على هذا الجهاز.'
       );
     }
   }
@@ -950,6 +994,7 @@ class Store extends ChangeNotifier {
         DateTime.tryParse('${payload['trialStart'] ?? ''}') ?? trialStart;
 
     await saveLocal();
+    _queueEncryptedLocalBackup();
     safeNotify();
 
     return const DainPayBackupResult(
@@ -1024,11 +1069,11 @@ class Store extends ChangeNotifier {
 
     try {
       await FirebaseAuth.instance.currentUser?.getIdToken(true);
-      final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
+      final callable = FirebaseFunctions.instanceFor(region: functionsRegion)
           .httpsCallable(
             'redeemActivationCode',
             options: HttpsCallableOptions(
-              timeout: const Duration(seconds: 30),
+              timeout: const Duration(seconds: 20),
             ),
           );
       final result = await callable.call({
@@ -1100,7 +1145,7 @@ class Store extends ChangeNotifier {
     }
 
     try {
-      await user.getIdToken(true);
+      await user.getIdToken();
 
       final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
           .httpsCallable(
@@ -1129,7 +1174,7 @@ class Store extends ChangeNotifier {
       switch (e.code) {
         case 'permission-denied':
           throw StateError(
-            'تم رفض طلب توليد رمز التفعيل. تحقق من نشر خدمة التفعيل في Firebase.',
+            'خدمة توليد رمز التفعيل رفضت الطلب. تأكد أن دالة generateActivationCode منشورة في Firebase وأن جلسة المالك صالحة.',
           );
         case 'unauthenticated':
           throw StateError('جلسة Firebase منتهية. أعد المحاولة.');
@@ -2219,12 +2264,9 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
 
     try {
       if (!await _ensureMicrophonePermission()) return;
+      await speech.cancel();
       final available = await speech.initialize(
-        debugLogging: true,
-        options: [
-          stt.SpeechToText.androidNoBluetooth,
-          stt.SpeechToText.androidIntentLookup,
-        ],
+        debugLogging: false,
         onStatus: (status) {
           if (!mounted) return;
           if (status == 'notListening' || status == 'done') {
@@ -2253,8 +2295,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
               title: const Text('التعرف الصوتي غير متاح'),
               content: const Text(
                 'لم يتمكن DainPay من تشغيل خدمة التعرف الصوتي. '
-                'تأكد من السماح بالميكروفون وتفعيل خدمة التعرف الصوتي في الهاتف، '
-                'ثم أعد المحاولة.',
+                'تأكد من منح الميكروفون صلاحية الاستخدام وأن خدمة التعرف الصوتي في الهاتف مفعلة، ثم أعد المحاولة.',
               ),
               actions: [
                 TextButton(
@@ -2715,30 +2756,22 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 OutlinedButton.icon(
                   onPressed: () async {
+                    final result = await store.createLocalBackupNow();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(result.message)),
+                    );
+                  },
+                  icon: const Icon(Icons.phone_android_rounded),
+                  label: const Text('إنشاء / تحديث النسخة المحلية'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () async {
                     final result = await store.backupToGoogleDrive();
                     if (!context.mounted) return;
                     if (result.success) {
-                      await showDialog<void>(
-                        context: context,
-                        builder: (_) => AlertDialog(
-                          title: const Text('تم تأمين النسخة'),
-                          content: SelectableText(
-                            (result.cloudSaved
-                                    ? 'تم تأمين البيانات محلياً وفي Google Drive.\n'
-                                    : 'تم تأمين البيانات محلياً. تعذر الوصول إلى Google Drive حالياً.\n') +
-                                (result.accountEmail == null
-                                    ? ''
-                                    : '\nحساب Google: ${result.accountEmail}\n') +
-                                '\nيمكن استعادة النسخة لاحقاً باختيار نفس حساب Google.\n'
-                                'ولا تحتاج إلى حفظ أي رمز.',
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(context),
-                              child: const Text('تم'),
-                            ),
-                          ],
-                        ),
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(result.message)),
                       );
                     } else {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -2747,7 +2780,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     }
                   },
                   icon: const Icon(Icons.cloud_upload_rounded),
-                  label: const Text('إنشاء / تحديث النسخة الاحتياطية'),
+                  label: const Text('إنشاء / تحديث نسخة Google Drive'),
                 ),
                 OutlinedButton.icon(
                   onPressed: () async {

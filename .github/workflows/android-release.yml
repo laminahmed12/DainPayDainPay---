@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: dainpay-release-${{ github.ref }}
+  group: dainpay-release-v2-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

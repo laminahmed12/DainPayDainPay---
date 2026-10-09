@@ -2342,44 +2342,6 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     return '';
   }
 
-  Future<bool> _ensureMicrophonePermission() async {
-    var status = await Permission.microphone.status;
-    if (status.isGranted) return true;
-
-    status = await Permission.microphone.request();
-    if (status.isGranted) return true;
-
-    if (status.isPermanentlyDenied && mounted) {
-      await showDialog<void>(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('صلاحية الميكروفون'),
-          content: const Text(
-            'التسجيل الصوتي يحتاج صلاحية الميكروفون. افتح إعدادات التطبيق وفعّل الميكروفون ثم عد إلى DainPay.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('إلغاء'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                Navigator.pop(context);
-                await openAppSettings();
-              },
-              child: const Text('فتح الإعدادات'),
-            ),
-          ],
-        ),
-      );
-    } else if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('يلزم السماح للميكروفون لاستخدام التسجيل الصوتي.')),
-      );
-    }
-    return false;
-  }
-
   Future<void> record() async {
     if (initializing) return;
 

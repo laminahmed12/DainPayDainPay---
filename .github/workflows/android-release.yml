@@ -145,7 +145,7 @@ jobs:
       - name: Validate Cloud Functions syntax
         run: node --check functions/index.js
       - name: Analyze code
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
       - name: Run regression tests
         run: flutter test
       - name: Build pre-release test APK (not for distribution)

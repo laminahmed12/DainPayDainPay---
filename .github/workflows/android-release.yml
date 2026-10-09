@@ -94,15 +94,8 @@ jobs:
           test -f android/app/google-services.json
           grep -q 'com.adreemk.dainpay' android/app/google-services.json
 
-      - name: Deploy Firestore rules when Firebase CI credentials are configured
-        env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
-        run: |
-          if [ -n "$FIREBASE_TOKEN" ]; then
-            npx --yes firebase-tools deploy --only firestore:rules,functions --project dainpay-a29fc --token "$FIREBASE_TOKEN"
-          else
-            echo "FIREBASE_TOKEN is not configured; skipping live Firestore rules deployment."
-          fi
+      - name: Keep CI validation isolated from production Firebase
+        run: echo "Live Firestore rules and Cloud Functions deployments are manual; pull-request builds must not change production services."
 
       - name: Add required Android speech permissions and recognition query
         run: |

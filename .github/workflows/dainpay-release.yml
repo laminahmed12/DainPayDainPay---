@@ -1,11 +1,7 @@
 name: DainPay Release APK
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - ".github/workflows/**"
+  # Manual fallback only; android-release.yml is the single automatic release workflow.
   workflow_dispatch:
 
 permissions:

@@ -1336,29 +1336,65 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final store = widget.store;
 
-    final filtered = store.customers.where((customer) {
-      final balance = store.balance(customer.id);
-      final normalizedQuery = _digits(query);
+    // Aggregate transactions once per rebuild. Previously each customer balance
+    // rescanned the full ledger several times during every tap/search/rebuild,
+    // which made the interface progressively slower as data grew.
+    final netByCustomer = <String, int>{};
+    final debtsByCustomer = <String, int>{};
+    final paidByCustomer = <String, int>{};
+    final firstDebtByCustomer = <String, DateTime>{};
+    for (final tx in store.transactions) {
+      final id = tx.customerId;
+      if (tx.type == 'debt') {
+        netByCustomer.update(id, (value) => value + tx.amountCents,
+            ifAbsent: () => tx.amountCents);
+        debtsByCustomer.update(id, (value) => value + tx.amountCents,
+            ifAbsent: () => tx.amountCents);
+        final first = firstDebtByCustomer[id];
+        if (first == null || tx.date.isBefore(first)) {
+          firstDebtByCustomer[id] = tx.date;
+        }
+      } else {
+        netByCustomer.update(id, (value) => value - tx.amountCents,
+            ifAbsent: () => -tx.amountCents);
+        paidByCustomer.update(id, (value) => value + tx.amountCents,
+            ifAbsent: () => tx.amountCents);
+      }
+    }
+    int balanceFor(String id) => max(0, netByCustomer[id] ?? 0);
+    int creditFor(String id) => max(0, -(netByCustomer[id] ?? 0));
+    String riskFor(String id) {
+      final current = balanceFor(id);
+      if (current <= 0) return creditFor(id) > 0 ? 'له رصيد دائن' : 'مسدد';
+      final firstDebt = firstDebtByCustomer[id];
+      if (firstDebt == null) return 'حديث';
+      final days = DateTime.now().difference(firstDebt).inDays;
+      if (days > 90) return 'خطر';
+      if (days > 30) return 'متأخر';
+      return 'حديث';
+    }
 
+    final normalizedQuery = _digits(query);
+    final filtered = store.customers.where((customer) {
+      final balance = balanceFor(customer.id);
       final matchesSearch = query.isEmpty ||
           customer.name.contains(query) ||
           customer.phone.contains(query) ||
           _digits(customer.phone).contains(normalizedQuery);
-
       final matchesFilter = filter == 'all' ||
           (filter == 'debt' && balance > 0) ||
           (filter == 'paid' && balance <= 0);
-
       return matchesSearch && matchesFilter;
     }).toList()
-      ..sort((a, b) => store.balance(b.id).compareTo(store.balance(a.id)));
+      ..sort((a, b) =>
+          balanceFor(b.id).compareTo(balanceFor(a.id)));
 
     final total = store.customers.fold<int>(
       0,
-      (sum, customer) => sum + max(0, store.balance(customer.id)),
+      (sum, customer) => sum + balanceFor(customer.id),
     );
     final debtCustomerCount =
-        store.customers.where((customer) => store.balance(customer.id) > 0).length;
+        store.customers.where((customer) => balanceFor(customer.id) > 0).length;
 
     return Scaffold(
       appBar: AppBar(
@@ -1529,8 +1565,8 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
             ...filtered.map((customer) {
-              final customerBalance = store.balance(customer.id);
-              final customerCredit = store.prepaidCredit(customer.id);
+              final customerBalance = balanceFor(customer.id);
+              final customerCredit = creditFor(customer.id);
               final displayedBalance = customerCredit > 0 ? customerCredit : customerBalance;
               return Card(
                 child: ListTile(
@@ -1554,9 +1590,9 @@ class _HomePageState extends State<HomePage> {
                       style: const TextStyle(fontWeight: FontWeight.bold)),
                   subtitle: Text(
                     '${customer.phone}\n'
-                    '${store.risk(customer.id)} • '
-                    'دَين ${money(store.debts(customer.id))} • '
-                    'مسدد ${money(store.paid(customer.id))}',
+                    '${riskFor(customer.id)} • '
+                    'دَين ${money(debtsByCustomer[customer.id] ?? 0)} • '
+                    'مسدد ${money(paidByCustomer[customer.id] ?? 0)}',
                   ),
                   isThreeLine: true,
                   trailing: Text(

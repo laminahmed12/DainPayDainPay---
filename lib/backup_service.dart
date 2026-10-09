@@ -143,6 +143,7 @@ class DainPayBackupService {
   Future<String?> _accessToken() async {
     try {
       GoogleSignInAccount? account = _google.currentUser;
+      account ??= await _google.signInSilently();
       account ??= await _google.signIn();
       if (account == null) return null;
       final authentication = await account.authentication;
@@ -234,7 +235,7 @@ class DainPayBackupService {
 
   Future<String?> _findFile(String token) async {
     final query = Uri.encodeQueryComponent(
-      "name = '$_fileName' and trashed = false",
+      "name = '$_fileName' and trashed = false and 'appDataFolder' in parents",
     );
     final uri = Uri.parse(
       'https://www.googleapis.com/drive/v3/files'

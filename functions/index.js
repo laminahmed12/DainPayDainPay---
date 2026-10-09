@@ -1,5 +1,6 @@
 const {onCall,HttpsError}=require("firebase-functions/v2/https");
 const {setGlobalOptions}=require("firebase-functions/v2/options");
+const {defineSecret}=require("firebase-functions/params");
 const admin=require("firebase-admin");
 const crypto=require("crypto");
 
@@ -8,9 +9,8 @@ setGlobalOptions({region:"europe-west1",maxInstances:5});
 
 const db=admin.firestore();
 
-// Kept server-side so activation-code writes/redemption are never trusted to
-// the Flutter client. Move this value to Secret Manager before public launch.
-const OWNER_ADMIN_PIN=process.env.OWNER_ADMIN_PIN || "116936";
+// No hard-coded fallback: configure with `firebase functions:secrets:set OWNER_ADMIN_PIN`.
+const OWNER_ADMIN_PIN=defineSecret("OWNER_ADMIN_PIN");
 
 function requireAuth(request){
   if(!request.auth || !request.auth.uid){
@@ -19,10 +19,10 @@ function requireAuth(request){
   return request.auth.uid;
 }
 
-exports.generateActivationCode=onCall(async(request)=>{
+exports.generateActivationCode=onCall({secrets:[OWNER_ADMIN_PIN]},async(request)=>{
   const uid=requireAuth(request);
   const pin=String(request.data?.adminPin || "");
-  if(pin !== OWNER_ADMIN_PIN){
+  if(!OWNER_ADMIN_PIN.value() || pin !== OWNER_ADMIN_PIN.value()){
     throw new HttpsError("permission-denied","رمز المالك غير صحيح.");
   }
 

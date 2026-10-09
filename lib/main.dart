@@ -2267,7 +2267,37 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
   final speech = stt.SpeechToText();
   bool listening = false;
   bool initializing = false;
+  bool _draftSavedForSession = false;
   String live = '';
+
+  Future<void> _saveVoiceDraft(String text) async {
+    final recognized = text.trim();
+    if (_draftSavedForSession || recognized.isEmpty) return;
+    _draftSavedForSession = true;
+    try {
+      widget.store.voiceDrafts.insert(
+        0,
+        VoiceDraft(
+          id: makeId(),
+          text: recognized,
+          date: DateTime.now(),
+          customerId: findCustomer(recognized),
+          amountCents: amountCentsFromText(recognized) ?? 0,
+          note: recognized,
+        ),
+      );
+      await widget.store.saveLocal();
+      widget.store.safeNotify();
+    } catch (e) {
+      _draftSavedForSession = false;
+      debugPrint('Voice draft save failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم التعرف على الكلام لكن تعذر حفظ المسودة. حاول الحفظ مرة أخرى.')),
+        );
+      }
+    }
+  }
 
   int? amountCentsFromText(String text) {
     final normalized = _digits(text);
@@ -2369,9 +2399,11 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       final available = await speech.initialize(
         debugLogging: false,
         onStatus: (status) {
-          if (!mounted) return;
           if (status == 'notListening' || status == 'done') {
-            setState(() => listening = false);
+            // Some Android speech providers stop without delivering a separate
+            // finalResult callback. Persist the latest partial transcript too.
+            unawaited(_saveVoiceDraft(live));
+            if (mounted) setState(() => listening = false);
           }
         },
         onError: (error) {
@@ -2440,13 +2472,17 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         return;
       }
 
+      _draftSavedForSession = false;
+      live = '';
       setState(() => listening = true);
 
       await speech.listen(
+        listenFor: const Duration(seconds: 60),
+        pauseFor: const Duration(seconds: 5),
         listenOptions: stt.SpeechListenOptions(
           localeId: arabicLocale,
           partialResults: true,
-          cancelOnError: true,
+          cancelOnError: false,
         ),
         onResult: (result) async {
           if (!mounted) return;
@@ -2455,23 +2491,10 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           if (!result.finalResult) return;
 
           final text = result.recognizedWords.trim();
-          if (text.isNotEmpty) {
-            widget.store.voiceDrafts.insert(
-              0,
-              VoiceDraft(
-                id: makeId(),
-                text: text,
-                date: DateTime.now(),
-                customerId: findCustomer(text),
-                amountCents: amountCentsFromText(text) ?? 0,
-                note: text,
-              ),
-            );
-            await widget.store.saveLocal();
-            widget.store.safeNotify();
+          if (result.finalResult) {
+            await _saveVoiceDraft(text);
+            if (mounted) setState(() => listening = false);
           }
-
-          if (mounted) setState(() => listening = false);
         },
       );
     } catch (e) {

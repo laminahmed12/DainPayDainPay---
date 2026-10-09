@@ -57,15 +57,31 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          settings = Path('android/settings.gradle')
+
+          settings_kts = Path('android/settings.gradle.kts')
+          settings_groovy = Path('android/settings.gradle')
+          settings = settings_kts if settings_kts.exists() else settings_groovy
+          if not settings.exists():
+              raise SystemExit('Flutter settings.gradle(.kts) was not generated')
           text = settings.read_text()
           if 'com.google.gms.google-services' not in text:
-              text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services" version "4.4.2" apply false', 1)
+              plugin = ('    id("com.google.gms.google-services") version "4.4.2" apply false'
+                        if settings.suffix == '.kts'
+                        else '    id "com.google.gms.google-services" version "4.4.2" apply false')
+              text = text.replace('plugins {', 'plugins {\\n' + plugin, 1)
           settings.write_text(text)
-          app = Path('android/app/build.gradle')
+
+          app_kts = Path('android/app/build.gradle.kts')
+          app_groovy = Path('android/app/build.gradle')
+          app = app_kts if app_kts.exists() else app_groovy
+          if not app.exists():
+              raise SystemExit('Flutter app build.gradle(.kts) was not generated')
           text = app.read_text()
-          if 'id "com.google.gms.google-services"' not in text:
-              text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services"', 1)
+          if 'com.google.gms.google-services' not in text:
+              plugin = ('    id("com.google.gms.google-services")'
+                        if app.suffix == '.kts'
+                        else '    id "com.google.gms.google-services"')
+              text = text.replace('plugins {', 'plugins {\\n' + plugin, 1)
           text = text.replace('flutter.minSdkVersion', '23')
           text = text.replace('flutter.compileSdkVersion', '35')
           text = text.replace('flutter.targetSdkVersion', '35')

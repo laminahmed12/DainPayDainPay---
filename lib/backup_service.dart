@@ -149,12 +149,19 @@ class DainPayBackupService {
       final authentication = await account.authentication;
       return authentication.accessToken;
     } on PlatformException catch (e) {
+      // Android Google Sign-In commonly exposes status 10 in the exception
+      // message OR its string representation, depending on plugin version.
+      final diagnostic = '${e.message ?? ''} ${e.details ?? ''} $e'.toLowerCase();
       if (e.code == 'sign_in_failed' &&
-          (e.message ?? '').contains('api: 10')) {
+          (diagnostic.contains('api: 10') ||
+              diagnostic.contains('developer_error') ||
+              diagnostic.contains('status code: 10'))) {
         throw StateError(
-          'إعداد Google Drive غير مكتمل (API 10). '
-          'يجب تسجيل SHA-1 لشهادة إصدار التطبيق في Firebase، '
-          'تفعيل Google Sign-In وDrive API، ثم تنزيل google-services.json الجديد.',
+          'تعذر تسجيل الدخول إلى Google Drive (خطأ API 10). '
+          'هذه مشكلة إعداد للتطبيق: راجع اسم الحزمة وبصمتي SHA-1 وSHA-256 '
+          'لشهادة التوقيع المستخدمة في هذا الإصدار داخل Firebase وGoogle Cloud، '
+          'وتأكد من تفعيل Google Sign-In وGoogle Drive API، ثم حدّث '
+          'google-services.json وأعد بناء التطبيق. النسخة المحلية المشفرة تبقى متاحة.',
         );
       }
       rethrow;

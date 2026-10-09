@@ -1091,45 +1091,10 @@ class Store extends ChangeNotifier {
       }
       return false;
     } on FirebaseFunctionsException catch (e) {
+      // Activation codes are server-managed; Firestore rules intentionally
+      // deny client access. Never fall back to a direct client-side redemption.
       debugPrint('Activation function error: ${e.code}: ${e.message ?? ''}');
-      if (!{
-        'permission-denied',
-        'not-found',
-        'unavailable',
-        'deadline-exceeded',
-        'unauthenticated',
-      }.contains(e.code)) {
-        return false;
-      }
-      try {
-        final ref = activationCodesRef.doc(clean);
-        final redeemed = await FirebaseFirestore.instance.runTransaction<bool>((tx) async {
-          final snap = await tx.get(ref);
-          if (!snap.exists) return false;
-          final data = snap.data() ?? <String, dynamic>{};
-          if (data['used'] == true) return false;
-          tx.update(ref, {
-            'used': true,
-            'usedAt': FieldValue.serverTimestamp(),
-            'usedUid': uid,
-            'usedDeviceId': deviceId,
-          });
-          return true;
-        });
-        if (!redeemed) return false;
-        await userRef.doc(uid).set({
-          'activated': true,
-          'activatedAt': FieldValue.serverTimestamp(),
-          'activatedDeviceId': deviceId,
-        }, SetOptions(merge: true));
-        activated = true;
-        await saveLocal();
-        safeNotify();
-        return true;
-      } catch (fallbackError) {
-        debugPrint('Activation fallback error: $fallbackError');
-        return false;
-      }
+      return false;
     } catch (e) {
       debugPrint('Activation error: $e');
       return false;
@@ -2686,10 +2651,12 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           SwitchListTile(
             value: store.dark,
-            onChanged: (value) async {
+            onChanged: (value) {
+              // Notify MaterialApp immediately so the theme changes without
+              // waiting for disk writes or the background encrypted backup.
               setState(() => store.dark = value);
-              await store.saveLocal();
               store.safeNotify();
+              unawaited(store.saveLocal());
             },
             title: const Text('الوضع الداكن'),
           ),

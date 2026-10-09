@@ -915,9 +915,11 @@ class Store extends ChangeNotifier {
       return _applyBackupPayload(payload);
     } catch (e) {
       debugPrint('Local restore error: $e');
-      return const DainPayBackupResult(
+      return DainPayBackupResult(
         success: false,
-        message: 'لا توجد نسخة محلية سليمة على هذا الجهاز.'
+        message: e is StateError
+            ? e.message.toString()
+            : 'تعذر استعادة النسخة المحلية: $e',
       );
     }
   }
@@ -1807,10 +1809,11 @@ class CustomerPage extends StatelessWidget {
     if (ok) {
       Navigator.pop(context);
     } else {
+      final reason = store.lastDeleteError.trim().isNotEmpty
+          ? store.lastDeleteError
+          : 'تعذر حذف العميل. لم يتم تغيير البيانات.';
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('تم حذف العميل محلياً، وستتم مزامنة الحذف مع Firebase عند توفر الاتصال.'),
-        ),
+        SnackBar(content: Text(reason)),
       );
     }
   }

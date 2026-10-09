@@ -2321,21 +2321,36 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       final locales = await speech.locales();
       String? arabicLocale;
       for (final locale in locales) {
-        if (locale.localeId.toLowerCase() == 'ar-ly') {
+        final normalized = locale.localeId.toLowerCase().replaceAll('_', '-');
+        if (normalized == 'ar-ly') {
           arabicLocale = locale.localeId;
           break;
         }
       }
       arabicLocale ??= locales
-          .where((locale) => locale.localeId.toLowerCase().startsWith('ar-'))
+          .where((locale) =>
+              locale.localeId.toLowerCase().replaceAll('_', '-').startsWith('ar-'))
           .map((locale) => locale.localeId)
           .firstOrNull;
+
+      if (arabicLocale == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'لا توجد خدمة تعرّف صوتي باللغة العربية على الهاتف. فعّل أو ثبّت خدمة Google Speech Services ثم أعد المحاولة.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
 
       setState(() => listening = true);
 
       await speech.listen(
         listenOptions: stt.SpeechListenOptions(
-          localeId: arabicLocale ?? 'ar-LY',
+          localeId: arabicLocale,
           partialResults: true,
           cancelOnError: true,
         ),

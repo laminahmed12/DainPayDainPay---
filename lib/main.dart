@@ -2380,12 +2380,6 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     return false;
   }
 
-  Future<void> _finishSpeechSession() async {
-    await Future<void>.delayed(const Duration(milliseconds: 700));
-    await _saveVoiceDraft(live);
-    if (mounted) setState(() => listening = false);
-  }
-
   Future<void> record() async {
     if (initializing) return;
 
@@ -2406,9 +2400,10 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         debugLogging: false,
         onStatus: (status) {
           if (status == 'notListening' || status == 'done') {
-            // Allow the final onResult callback to arrive before saving the
-            // last partial transcript. Android speech providers vary in order.
-            unawaited(_finishSpeechSession());
+            // Some Android speech providers stop without delivering a separate
+            // finalResult callback. Persist the latest partial transcript too.
+            unawaited(_saveVoiceDraft(live));
+            if (mounted) setState(() => listening = false);
           }
         },
         onError: (error) {
@@ -2416,11 +2411,10 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           if (!mounted) return;
           setState(() => listening = false);
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
+            const SnackBar(
               content: Text(
-                'تعذر تشغيل التعرف الصوتي (${error.errorMsg}). تحقق من تفعيل الميكروفون وخدمة Google للتعرف على الكلام والاتصال بالإنترنت.',
+                'تعذر تشغيل التعرف الصوتي. تحقق من الميكروفون وخدمة التعرف الصوتي.',
               ),
-              duration: const Duration(seconds: 5),
             ),
           );
         },
@@ -2465,12 +2459,17 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         locales.map((locale) => locale.localeId),
       );
 
-      // Some Android speech providers support Arabic but omit it from the
-      // advertised locale list. Try the standard Arabic locale as a fallback
-      // instead of refusing to start the microphone session.
-      final selectedLocale = arabicLocale ?? 'ar';
       if (arabicLocale == null) {
-        debugPrint('Arabic locale was not advertised; trying generic ar.');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'لا توجد خدمة تعرّف صوتي باللغة العربية على الهاتف. فعّل أو ثبّت خدمة Google Speech Services ثم أعد المحاولة.',
+              ),
+            ),
+          );
+        }
+        return;
       }
 
       _draftSavedForSession = false;
@@ -2481,7 +2480,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         listenFor: const Duration(seconds: 60),
         pauseFor: const Duration(seconds: 5),
         listenOptions: stt.SpeechListenOptions(
-          localeId: selectedLocale,
+          localeId: arabicLocale,
           partialResults: true,
           cancelOnError: false,
         ),

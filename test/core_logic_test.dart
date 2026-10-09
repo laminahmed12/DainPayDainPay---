@@ -10,7 +10,7 @@ void main() {
     });
 
     test('parses Arabic-Indic digits', () {
-      expect(parseCents('١٨٧,٥٠'), 18700);
+      expect(parseCents('١٨٧,٥٠'), 18750);
     });
   });
 

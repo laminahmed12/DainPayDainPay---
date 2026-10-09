@@ -447,8 +447,6 @@ class Store extends ChangeNotifier {
   Timer? _localBackupTimer;
 
   bool _disposed = false;
-  bool _syncQueued = false;
-  Future<void>? _syncFuture;
 
   static Future<Store> load() async {
     final store = Store();
@@ -2860,7 +2858,7 @@ class _ActivationPageState extends State<ActivationPage> {
     super.dispose();
   }
 
-  Future<void> activate() async {
+  Future<void> redeemActivation() async {
     if (busy) return;
 
     if (!widget.store.firebaseReady) {
@@ -2933,11 +2931,11 @@ class _ActivationPageState extends State<ActivationPage> {
             keyboardType: TextInputType.number,
             textInputAction: TextInputAction.done,
             decoration: const InputDecoration(labelText: 'كود التفعيل'),
-            onSubmitted: (_) => activate(),
+            onSubmitted: (_) => redeemActivation(),
           ),
           const SizedBox(height: 12),
           FilledButton(
-            onPressed: busy ? null : activate,
+            onPressed: busy ? null : redeemActivation,
             child: Text(busy ? 'جارٍ التحقق...' : 'تفعيل دائم'),
           ),
         ],

@@ -729,21 +729,27 @@ class Store extends ChangeNotifier {
           // If this customer previously selected a Google account, update
           // Drive silently in the background. Never open the account chooser
           // while the customer is adding a debt or payment.
-          final cloud = await backupService.backupIfSignedIn(
-            payload: backupPayload(),
-          );
-          if (cloud.cloudSaved) {
+          final previousCloudBackup = lastBackupAt;
+          final cloudBackupDue = previousCloudBackup == null ||
+              DateTime.now().difference(previousCloudBackup) >=
+                  const Duration(minutes: 2);
+          if (cloudBackupDue) {
+            final cloud = await backupService.backupIfSignedIn(
+              payload: backupPayload(),
+            );
+            if (cloud.cloudSaved) {
             lastBackupAt = DateTime.now();
             backupGoogleEmail = cloud.accountEmail ?? backupGoogleEmail;
             await _pref(() => prefs.setString(
                   'last_backup_at',
                   lastBackupAt!.toIso8601String(),
                 ));
-            if (backupGoogleEmail.isNotEmpty) {
-              await _pref(() => prefs.setString(
-                    'backup_google_email',
-                    backupGoogleEmail,
-                  ));
+              if (backupGoogleEmail.isNotEmpty) {
+                await _pref(() => prefs.setString(
+                      'backup_google_email',
+                      backupGoogleEmail,
+                    ));
+              }
             }
           }
           safeNotify();

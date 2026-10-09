@@ -150,17 +150,13 @@ jobs:
           ! grep -q "رمز الاسترداد" lib/main.dart
           ! grep -q "backup_recovery_code" lib/main.dart
       - name: Analyze code
-        run: flutter analyze --no-fatal-warnings --no-fatal-infos
-      - name: Build release APK
+        run: flutter analyze
+      - name: Run regression tests
+        run: flutter test
+      - name: Build pre-release test APK (not for distribution)
         run: flutter build apk --release
-      - name: Record release signing certificate
-        run: |
-          find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1 | xargs -I{} {} verify --print-certs build/app/outputs/flutter-apk/app-release.apk > release-signing-certificate.txt || true
-          cat release-signing-certificate.txt
-      - name: Upload APK artifact
+      - name: Upload pre-release test artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-1.6.9-build-release
-          path: |
-            build/app/outputs/flutter-apk/app-release.apk
-            release-signing-certificate.txt
+          name: dainpay-pre-release-test-build
+          path: build/app/outputs/flutter-apk/app-release.apk

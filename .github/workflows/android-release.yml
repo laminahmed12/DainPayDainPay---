@@ -68,7 +68,7 @@ jobs:
               plugin = ('    id("com.google.gms.google-services") version "4.4.2" apply false'
                         if settings.suffix == '.kts'
                         else '    id "com.google.gms.google-services" version "4.4.2" apply false')
-              text = text.replace('plugins {', 'plugins {\\n' + plugin, 1)
+              text = text.replace('plugins {', 'plugins {' + chr(10) + plugin, 1)
           settings.write_text(text)
 
           app_kts = Path('android/app/build.gradle.kts')
@@ -81,7 +81,7 @@ jobs:
               plugin = ('    id("com.google.gms.google-services")'
                         if app.suffix == '.kts'
                         else '    id "com.google.gms.google-services"')
-              text = text.replace('plugins {', 'plugins {\\n' + plugin, 1)
+              text = text.replace('plugins {', 'plugins {' + chr(10) + plugin, 1)
           text = text.replace('flutter.minSdkVersion', '23')
           text = text.replace('flutter.compileSdkVersion', '35')
           text = text.replace('flutter.targetSdkVersion', '35')

@@ -479,6 +479,10 @@ class Store extends ChangeNotifier {
         await store.prefs.remove('dainpay_local_backup_key');
       }
     }
+    if (store.localBackupKey.isNotEmpty &&
+        store.prefs.containsKey('dainpay_local_backup_key')) {
+      await store.prefs.remove('dainpay_local_backup_key');
+    }
     final lastBackup = store.prefs.getString('last_backup_at');
     store.lastBackupAt =
         lastBackup == null ? null : DateTime.tryParse(lastBackup);

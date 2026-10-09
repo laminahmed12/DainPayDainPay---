@@ -77,6 +77,19 @@ String timeText(DateTime date) {
       '${date.minute.toString().padLeft(2, '0')}';
 }
 
+String? selectArabicSpeechLocale(Iterable<String> localeIds) {
+  final locales = localeIds.toList(growable: false);
+  for (final localeId in locales) {
+    final normalized = localeId.toLowerCase().replaceAll('_', '-');
+    if (normalized == 'ar-ly') return localeId;
+  }
+  for (final localeId in locales) {
+    final normalized = localeId.toLowerCase().replaceAll('_', '-');
+    if (normalized == 'ar' || normalized.startsWith('ar-')) return localeId;
+  }
+  return null;
+}
+
 String _digits(String value) {
   const arabic = '٠١٢٣٤٥٦٧٨٩';
   const persian = '۰۱۲۳۴۵۶۷۸۹';
@@ -1137,8 +1150,20 @@ class Store extends ChangeNotifier {
       }
       return false;
     } on FirebaseFunctionsException catch (e) {
-      debugPrint('Owner verification failed: ' + e.code);
+      debugPrint('Owner verification failed: ${e.code}: ${e.message ?? ''}');
       if (e.code == 'permission-denied') return false;
+      if (e.code == 'not-found') {
+        throw StateError(
+          'خدمة التحقق من رمز المالك غير موجودة في مشروع Firebase الحالي. '
+          'يجب نشر دالة verifyOwnerPin في المنطقة us-central1؛ '
+          'لم يتم استبدال التحقق الآمن بأي تحقق محلي.',
+        );
+      }
+      if (e.code == 'failed-precondition') {
+        throw StateError(
+          'خدمة Firebase تعمل، لكن إعداد رمز المالك السري غير مكتمل في Secret Manager.',
+        );
+      }
       throw StateError('تعذر التحقق من رمز المالك حالياً: ' + e.code);
     }
   }
@@ -2355,19 +2380,12 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       if (!mounted) return;
 
       final locales = await speech.locales();
-      String? arabicLocale;
-      for (final locale in locales) {
-        final normalized = locale.localeId.toLowerCase().replaceAll('_', '-');
-        if (normalized == 'ar-ly') {
-          arabicLocale = locale.localeId;
-          break;
-        }
-      }
-      arabicLocale ??= locales
-          .where((locale) =>
-              locale.localeId.toLowerCase().replaceAll('_', '-').startsWith('ar-'))
-          .map((locale) => locale.localeId)
-          .firstOrNull;
+      // Android speech providers may report generic Arabic as "ar"
+      // rather than a regional locale such as "ar-LY" or "ar-SA".
+      // Accept both forms and prefer Libyan Arabic when available.
+      final arabicLocale = selectArabicSpeechLocale(
+        locales.map((locale) => locale.localeId),
+      );
 
       if (arabicLocale == null) {
         if (mounted) {

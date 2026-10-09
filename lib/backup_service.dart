@@ -293,12 +293,6 @@ class DainPayBackupService {
     );
   }
 
-  Future<String?> _findFile(String token) async {
-    final files = await _findBackupFiles(token);
-    if (files.isEmpty) return null;
-    return '${files.first['id']}';
-  }
-
   Future<void> _pruneOldFiles(String token, {int keep = 5}) async {
     try {
       final query = Uri.encodeQueryComponent(

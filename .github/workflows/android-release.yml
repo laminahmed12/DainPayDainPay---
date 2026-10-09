@@ -142,6 +142,8 @@ jobs:
           grep -q "android.speech.RecognitionService" android/app/src/main/AndroidManifest.xml
           ! grep -q "رمز الاسترداد" lib/main.dart
           ! grep -q "backup_recovery_code" lib/main.dart
+      - name: Validate Cloud Functions syntax
+        run: node --check functions/index.js
       - name: Analyze code
         run: flutter analyze
       - name: Run regression tests

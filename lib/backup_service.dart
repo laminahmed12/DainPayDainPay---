@@ -266,7 +266,7 @@ class DainPayBackupService {
     return Map<String, dynamic>.from(payload);
   }
 
-  Future<String?> _findFile(String token) async {
+  Future<List<Map<String, dynamic>>> _findBackupFiles(String token) async {
     final query = Uri.encodeQueryComponent(
       "name = '$_fileName' and trashed = false and 'appDataFolder' in parents",
     );
@@ -284,13 +284,19 @@ class DainPayBackupService {
     if (response.statusCode != 200) {
       throw Exception('Drive list failed: ${response.statusCode}');
     }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map || decoded['files'] is! List) return <Map<String, dynamic>>[];
+    return List<Map<String, dynamic>>.from(
+      (decoded['files'] as List).whereType<Map>().map(
+            (item) => Map<String, dynamic>.from(item),
+          ),
+    );
+  }
 
-    final data = jsonDecode(response.body);
-    final files = data['files'];
-    if (files is List && files.isNotEmpty) {
-      return '${files.first['id']}';
-    }
-    return null;
+  Future<String?> _findFile(String token) async {
+    final files = await _findBackupFiles(token);
+    if (files.isEmpty) return null;
+    return '${files.first['id']}';
   }
 
   Future<void> _pruneOldFiles(String token, {int keep = 5}) async {
@@ -436,7 +442,9 @@ class DainPayBackupService {
         final encrypted = await encrypt(payload, driveKey);
         // Create a new recovery point instead of overwriting the last
         // known-good cloud backup. Keep the five newest snapshots.
-        await _upload(token, encrypted);
+        final uploadedId = await _upload(token, encrypted);
+        final uploadedContent = await _download(token, uploadedId);
+        await decrypt(uploadedContent, driveKey);
         await _pruneOldFiles(token);
         cloudSaved = true;
       }
@@ -496,7 +504,9 @@ class DainPayBackupService {
       );
       // Preserve a rolling history so accidental edits/deletions can be
       // recovered from a previous verified backup.
-      await _upload(token, encrypted);
+      final uploadedId = await _upload(token, encrypted);
+      final uploadedContent = await _download(token, uploadedId);
+      await decrypt(uploadedContent, driveKeyForAccountId(account.id));
       await _pruneOldFiles(token);
       return DainPayBackupResult(
         success: true,
@@ -521,15 +531,28 @@ class DainPayBackupService {
       throw StateError('اختر حساب Google أولاً');
     }
 
-    final fileId = await _findFile(token);
-    if (fileId == null) {
+    final files = await _findBackupFiles(token);
+    if (files.isEmpty) {
       throw StateError('لا توجد نسخة احتياطية لهذا الحساب');
     }
 
-    final encrypted = await _download(token, fileId);
-    return decrypt(
-      encrypted,
-      driveKeyForAccountId(account.id),
+    Object? lastError;
+    final driveKey = driveKeyForAccountId(account.id);
+    // Try newest first, then fall back to an older recovery point if the
+    // latest file is damaged or incomplete.
+    for (final file in files) {
+      final fileId = '${file['id'] ?? ''}';
+      if (fileId.isEmpty) continue;
+      try {
+        final encrypted = await _download(token, fileId);
+        return await decrypt(encrypted, driveKey);
+      } catch (e) {
+        lastError = e;
+        debugPrint('Drive backup candidate rejected ($fileId): $e');
+      }
+    }
+    throw StateError(
+      'تعذر فتح النسخ السحابية المتاحة. قد تكون تالفة أو لا تخص هذا الحساب. $lastError',
     );
   }
 

@@ -73,31 +73,56 @@ class DainPayBackupService {
     final aExists = await fileA.exists();
     final bExists = await fileB.exists();
 
+    // Always preserve the newest valid copy. Write over the missing, corrupt,
+    // or older slot instead of choosing a slot randomly.
+    final aTime = aExists ? await _validBackupTime(fileA, localKey) : null;
+    final bTime = bExists ? await _validBackupTime(fileB, localKey) : null;
+
     final File target;
-    if (!aExists && bExists) {
+    if (!aExists) {
       target = fileA;
-    } else if (aExists && !bExists) {
+    } else if (!bExists) {
+      target = fileB;
+    } else if (aTime == null) {
+      target = fileA;
+    } else if (bTime == null) {
       target = fileB;
     } else {
-      target =
-          DateTime.now().millisecondsSinceEpoch.isEven ? fileA : fileB;
+      target = aTime.isAfter(bTime) ? fileB : fileA;
     }
 
-    final temp = File('${target.path}.tmp');
+    final temp = File(
+      '${target.path}.${DateTime.now().microsecondsSinceEpoch}.tmp',
+    );
     await temp.writeAsString(encrypted, flush: true);
 
-    // Verify the encrypted envelope before replacing the previous good copy.
+    // Validate both the new encrypted envelope and its decrypted payload
+    // before replacing an older slot.
     await decrypt(encrypted, localKey);
-
     if (await target.exists()) {
       await target.delete();
     }
     await temp.rename(target.path);
 
-    // Verify the file after the atomic rename as well.
     final written = await target.readAsString();
     await decrypt(written, localKey);
     return true;
+  }
+
+  Future<DateTime?> _validBackupTime(File file, String localKey) async {
+    try {
+      final text = await file.readAsString();
+      final envelope = jsonDecode(text);
+      if (envelope is! Map ||
+          envelope['format'] != 'DainPay encrypted backup') {
+        return null;
+      }
+      await decrypt(text, localKey);
+      return DateTime.tryParse('${envelope['createdAt']}') ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<Map<String, dynamic>> restoreLocal({
@@ -139,11 +164,13 @@ class DainPayBackupService {
     return Map<String, dynamic>.from(candidates.first['payload'] as Map);
   }
 
-  Future<String?> _accessToken() async {
+  Future<String?> _accessToken({bool allowInteractiveSignIn = true}) async {
     try {
       GoogleSignInAccount? account = _google.currentUser;
       account ??= await _google.signInSilently();
-      account ??= await _google.signIn();
+      if (account == null && allowInteractiveSignIn) {
+        account = await _google.signIn();
+      }
       if (account == null) return null;
       final authentication = await account.authentication;
       return authentication.accessToken;
@@ -405,6 +432,41 @@ class DainPayBackupService {
       message: 'فشل النسخ الاحتياطي المحلي والسحابي: $cloudError',
       accountEmail: email,
     );
+  }
+
+  /// Silent cloud backup for autosave. Never opens an account chooser.
+  /// Interactive account selection remains available through [backup].
+  Future<DainPayBackupResult> backupIfSignedIn({
+    required Map<String, dynamic> payload,
+  }) async {
+    try {
+      final token = await _accessToken(allowInteractiveSignIn: false);
+      final account = _google.currentUser;
+      if (token == null || account == null) {
+        return const DainPayBackupResult(
+          success: false,
+          message: 'لم يتم اختيار حساب Google للنسخ التلقائي.',
+        );
+      }
+      final encrypted = await encrypt(
+        payload,
+        driveKeyForAccountId(account.id),
+      );
+      final existing = await _findFile(token);
+      await _upload(token, encrypted, fileId: existing);
+      return DainPayBackupResult(
+        success: true,
+        message: 'تم تحديث النسخة الاحتياطية تلقائيًا.',
+        accountEmail: account.email,
+        cloudSaved: true,
+      );
+    } catch (e) {
+      debugPrint('Silent Google Drive backup failed: $e');
+      return DainPayBackupResult(
+        success: false,
+        message: 'تعذر تحديث النسخة السحابية تلقائيًا: $e',
+      );
+    }
   }
 
   Future<Map<String, dynamic>> restore() async {

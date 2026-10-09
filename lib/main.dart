@@ -233,12 +233,13 @@ String buildAccountStatement(Store store, Customer customer) {
     '',
     'إجمالي الديون: ${money(debt)}',
     'إجمالي المسدد: ${money(paid)}',
-    'المتبقي: ${money(balance)}',
+    'الدين المتبقي: ${money(balance)}',
     if (store.prepaidCredit(customer.id) > 0)
-      'الرصيد المسبق: ${money(store.prepaidCredit(customer.id))}',
-    'الحالة: ${balance <= 0
-        ? (store.prepaidCredit(customer.id) > 0 ? 'له رصيد مسبق' : 'مسدد')
-        : 'عليه رصيد'}',
+      'الرصيد الدائن لصالح العميل: ${money(store.prepaidCredit(customer.id))}',
+    'الرصيد الفعلي للحساب: ${money(store.prepaidCredit(customer.id) > 0 ? store.prepaidCredit(customer.id) : balance)}',
+    'الحالة: ${balance > 0
+        ? 'عليه دين'
+        : (store.prepaidCredit(customer.id) > 0 ? 'له رصيد دائن' : 'مسدد')}',
     '',
     'تفاصيل العمليات:',
   ];
@@ -259,7 +260,8 @@ String buildAccountStatement(Store store, Customer customer) {
   lines.addAll([
     '',
     '------------------------------',
-    'المتبقي المطلوب: ${money(balance)}',
+    'الدين المتبقي: ${money(balance)}',
+    'الرصيد الفعلي للحساب: ${money(store.prepaidCredit(customer.id) > 0 ? store.prepaidCredit(customer.id) : balance)}',
   ]);
 
   return lines.join('\\n');
@@ -1803,12 +1805,19 @@ class CustomerPage extends StatelessWidget {
                   const Icon(Icons.account_balance_wallet_rounded,
                       size: 36, color: emerald),
                   Text(
-                    money(store.balance(customer.id)),
+                    money(store.prepaidCredit(customer.id) > 0
+                        ? store.prepaidCredit(customer.id)
+                        : store.balance(customer.id)),
                     style: const TextStyle(
                         fontSize: 30, fontWeight: FontWeight.w900),
                   ),
                   Text(
-                    'الدَين ${money(store.debts(customer.id))} • '
+                    store.prepaidCredit(customer.id) > 0
+                        ? 'رصيد دائن لصالح العميل'
+                        : 'الدَين المتبقي • ${money(store.balance(customer.id))}',
+                  ),
+                  Text(
+                    'إجمالي الديون ${money(store.debts(customer.id))} • '
                     'المسدد ${money(store.paid(customer.id))}',
                   ),
                   if (store.prepaidCredit(customer.id) > 0)

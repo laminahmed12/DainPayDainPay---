@@ -274,7 +274,7 @@ class DainPayBackupService {
       'https://www.googleapis.com/drive/v3/files'
       '?spaces=appDataFolder'
       '&q=$query'
-      '&pageSize=10&orderBy=modifiedTime desc'
+      '&pageSize=100&orderBy=modifiedTime desc'
       '&fields=files(id,name,modifiedTime)',
     );
     final response = await _client.get(
@@ -291,6 +291,46 @@ class DainPayBackupService {
       return '${files.first['id']}';
     }
     return null;
+  }
+
+  Future<void> _pruneOldFiles(String token, {int keep = 5}) async {
+    try {
+      final query = Uri.encodeQueryComponent(
+        "name = '$_fileName' and trashed = false and 'appDataFolder' in parents",
+      );
+      final response = await _client.get(
+        Uri.parse(
+          'https://www.googleapis.com/drive/v3/files'
+          '?spaces=appDataFolder&q=$query&pageSize=100'
+          '&orderBy=modifiedTime desc&fields=files(id,name,modifiedTime)',
+        ),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (response.statusCode != 200) return;
+      final decoded = jsonDecode(response.body);
+      final files = decoded is Map && decoded['files'] is List
+          ? List<Map<String, dynamic>>.from(
+              (decoded['files'] as List).whereType<Map>().map(
+                    (item) => Map<String, dynamic>.from(item),
+                  ),
+            )
+          : <Map<String, dynamic>>[];
+      for (final oldFile in files.skip(keep)) {
+        final id = '${oldFile['id'] ?? ''}';
+        if (id.isEmpty) continue;
+        final deletion = await _client.delete(
+          Uri.parse('https://www.googleapis.com/drive/v3/files/$id'),
+          headers: {'Authorization': 'Bearer $token'},
+        );
+        if (deletion.statusCode < 200 || deletion.statusCode >= 300) {
+          debugPrint('Could not prune old Drive backup $id: ${deletion.statusCode}');
+        }
+      }
+    } catch (e) {
+      // Pruning is housekeeping only. Never fail a verified new backup
+      // because deletion of an old archive failed.
+      debugPrint('Drive backup pruning deferred: $e');
+    }
   }
 
   Future<String> _upload(
@@ -394,8 +434,10 @@ class DainPayBackupService {
       if (token != null && account != null) {
         final driveKey = driveKeyForAccountId(account.id);
         final encrypted = await encrypt(payload, driveKey);
-        final existing = await _findFile(token);
-        await _upload(token, encrypted, fileId: existing);
+        // Create a new recovery point instead of overwriting the last
+        // known-good cloud backup. Keep the five newest snapshots.
+        await _upload(token, encrypted);
+        await _pruneOldFiles(token);
         cloudSaved = true;
       }
     } catch (e) {
@@ -452,8 +494,10 @@ class DainPayBackupService {
         payload,
         driveKeyForAccountId(account.id),
       );
-      final existing = await _findFile(token);
-      await _upload(token, encrypted, fileId: existing);
+      // Preserve a rolling history so accidental edits/deletions can be
+      // recovered from a previous verified backup.
+      await _upload(token, encrypted);
+      await _pruneOldFiles(token);
       return DainPayBackupResult(
         success: true,
         message: 'تم تحديث النسخة الاحتياطية تلقائيًا.',

@@ -63,11 +63,35 @@ class DainPayBackupService {
             : (DateTime.now().millisecondsSinceEpoch.isEven ? fileA : fileB);
     final temp = File('${target.path}.tmp');
     await temp.writeAsString(encrypted, flush: true);
-    if (await target.exists()) {
-      await target.delete();
+
+    // Verify the newly written encrypted backup before touching the last good copy.
+    await decrypt(await temp.readAsString(), recoveryCode);
+
+    // Keep a rollback copy until the replacement has completed successfully.
+    final previous = File('${target.path}.previous');
+    if (await previous.exists()) {
+      await previous.delete();
     }
-    await temp.rename(target.path);
-    return true;
+    final hadTarget = await target.exists();
+    if (hadTarget) {
+      await target.rename(previous.path);
+    }
+    try {
+      await temp.rename(target.path);
+      await decrypt(await target.readAsString(), recoveryCode);
+      if (await previous.exists()) {
+        await previous.delete();
+      }
+      return true;
+    } catch (_) {
+      if (await target.exists()) {
+        await target.delete();
+      }
+      if (hadTarget && await previous.exists()) {
+        await previous.rename(target.path);
+      }
+      rethrow;
+    }
   }
 
   Future<Map<String, dynamic>> restoreLocal(String recoveryCode) async {

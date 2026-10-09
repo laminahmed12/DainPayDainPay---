@@ -1124,7 +1124,30 @@ class Store extends ChangeNotifier {
       throw StateError('يلزم الاتصال بالإنترنت للتحقق من رمز المالك.');
     }
     final normalizedPin = _digits(pin).trim();
-    if (!RegExp(r'^\\d{6,12}      throw StateError('تعذر الاتصال بحساب المالك في Firebase.');
+    if (!RegExp(r'^\d{6,12}$').hasMatch(normalizedPin)) return false;
+
+    try {
+      final callable = FirebaseFunctions.instanceFor(region: functionsRegion)
+          .httpsCallable('verifyOwnerPin');
+      final result = await callable.call({'adminPin': normalizedPin});
+      final data = result.data;
+      if (data is Map && data['success'] == true) {
+        ownerPinSession = normalizedPin;
+        isAdmin = true;
+        safeNotify();
+        return true;
+      }
+      return false;
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('Owner verification failed: ' + e.code);
+      if (e.code == 'permission-denied') return false;
+      throw StateError('تعذر التحقق من رمز المالك حالياً: ' + e.code);
+    }
+  }
+
+  Future<String?> generateCode() async {
+    if (!firebaseReady || !isAdmin || ownerPinSession.isEmpty || uid.isEmpty) {
+      throw StateError('تعذر الاتصال بحساب المالك في Firebase.');
     }
 
     final user = FirebaseAuth.instance.currentUser;
@@ -1134,56 +1157,41 @@ class Store extends ChangeNotifier {
 
     try {
       await user.getIdToken();
-
-      final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
+      final callable = FirebaseFunctions.instanceFor(region: functionsRegion)
           .httpsCallable(
             'generateActivationCode',
             options: HttpsCallableOptions(
               timeout: const Duration(seconds: 30),
             ),
           );
-
       final result = await callable.call({
         'adminPin': ownerPinSession,
         'deviceId': deviceId,
       });
-
       final data = result.data;
       if (data is Map && data['success'] == true && data['code'] is String) {
         return data['code'] as String;
       }
-
       throw StateError('خدمة التفعيل أعادت استجابة غير صالحة.');
     } on FirebaseFunctionsException catch (e) {
-      debugPrint(
-        'Generate activation function error: ${e.code}: ${e.message ?? ''}',
-      );
-
+      debugPrint('Generate activation function error: ' + e.code);
       switch (e.code) {
         case 'permission-denied':
-          throw StateError(
-            'خدمة توليد رمز التفعيل رفضت الطلب. تأكد أن دالة generateActivationCode منشورة في Firebase وأن جلسة المالك صالحة.',
-          );
+          throw StateError('رمز المالك غير صحيح أو أن صلاحية التوليد غير متاحة.');
         case 'unauthenticated':
           throw StateError('جلسة Firebase منتهية. أعد المحاولة.');
         case 'not-found':
-          throw StateError(
-            'خدمة التفعيل غير منشورة في Firebase أو المنطقة غير صحيحة.',
-          );
+          throw StateError('خدمة التفعيل غير منشورة في Firebase أو المنطقة غير صحيحة.');
         case 'unavailable':
         case 'deadline-exceeded':
-          throw StateError(
-            'خدمة التفعيل غير متاحة حالياً. تحقق من اتصال الإنترنت ثم أعد المحاولة.',
-          );
+          throw StateError('خدمة التفعيل غير متاحة حالياً. تحقق من اتصال الإنترنت ثم أعد المحاولة.');
         case 'invalid-argument':
           throw StateError('بيانات طلب التفعيل غير صحيحة.');
         default:
-          throw StateError(
-            'تعذر توليد رمز التفعيل حالياً. رمز الخطأ: ${e.code}.',
-          );
+          throw StateError('تعذر توليد رمز التفعيل حالياً. رمز الخطأ: ' + e.code);
       }
     } catch (e) {
-      debugPrint('Generate activation error: $e');
+      debugPrint('Generate activation error: ' + e.toString());
       if (e is StateError) rethrow;
       throw StateError('تعذر توليد رمز التفعيل حالياً.');
     }

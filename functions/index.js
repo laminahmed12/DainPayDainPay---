@@ -15,7 +15,7 @@ const OWNER_ADMIN_PIN=defineSecret("OWNER_ADMIN_PIN");
 
 function configuredOwnerPin(){
   const pin=String(OWNER_ADMIN_PIN.value() || "").trim();
-  if(!/^\\d{6,12}$/.test(pin)){
+  if(!/^\d{6,12}$/.test(pin)){
     throw new HttpsError("failed-precondition","رمز المالك غير مضبوط في Secret Manager.");
   }
   return pin;

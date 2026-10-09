@@ -1359,6 +1359,8 @@ class _HomePageState extends State<HomePage> {
       0,
       (sum, customer) => sum + max(0, store.balance(customer.id)),
     );
+    final debtCustomerCount =
+        store.customers.where((customer) => store.balance(customer.id) > 0).length;
 
     return Scaffold(
       appBar: AppBar(
@@ -1458,14 +1460,14 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     Expanded(
                       child: _Stat(
-                          title: 'إجمالي المتبقي',
+                          title: 'إجمالي الديون المتبقية',
                           value: money(total),
                           color: burgundy),
                     ),
                     Expanded(
                       child: _Stat(
                           title: 'العملاء عليهم دَين',
-                          value: '${filtered.length}',
+                          value: '$debtCustomerCount',
                           color: emerald),
                     ),
                   ],
@@ -1509,7 +1511,7 @@ class _HomePageState extends State<HomePage> {
                   onSelected: (_) => setState(() => filter = 'debt'),
                 ),
                 ChoiceChip(
-                  label: const Text('مسدد'),
+                  label: const Text('مسدد / له رصيد'),
                   selected: filter == 'paid',
                   onSelected: (_) => setState(() => filter = 'paid'),
                 ),

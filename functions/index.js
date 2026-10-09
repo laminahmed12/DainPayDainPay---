@@ -1,16 +1,25 @@
 const {onCall,HttpsError}=require("firebase-functions/v2/https");
 const {setGlobalOptions}=require("firebase-functions/v2/options");
+const {defineSecret}=require("firebase-functions/params");
 const admin=require("firebase-admin");
 const crypto=require("crypto");
 
 admin.initializeApp();
-setGlobalOptions({region:"us-central1",maxInstances:5,enforceAppCheck:false});
+setGlobalOptions({region:"us-central1",maxInstances:5});
 
 const db=admin.firestore();
 
-// Kept server-side so activation-code writes/redemption are never trusted to
-// the Flutter client. Move this value to Secret Manager before public launch.
-const OWNER_ADMIN_PIN=String(process.env.OWNER_ADMIN_PIN || "116936").trim();
+// Configure once with: firebase functions:secrets:set OWNER_ADMIN_PIN
+// Never fall back to a PIN embedded in source code or client builds.
+const OWNER_ADMIN_PIN=defineSecret("OWNER_ADMIN_PIN");
+
+function configuredOwnerPin(){
+  const pin=String(OWNER_ADMIN_PIN.value() || "").trim();
+  if(!/^\d{6,12}$/.test(pin)){
+    throw new HttpsError("failed-precondition","رمز المالك غير مضبوط في Secret Manager.");
+  }
+  return pin;
+}
 
 function requireAuth(request){
   if(!request.auth || !request.auth.uid){
@@ -19,10 +28,19 @@ function requireAuth(request){
   return request.auth.uid;
 }
 
-exports.generateActivationCode=onCall({invoker:"public",enforceAppCheck:false},async(request)=>{
+exports.verifyOwnerPin=onCall({invoker:"public",secrets:[OWNER_ADMIN_PIN],enforceAppCheck:false},async(request)=>{
+  requireAuth(request);
+  const pin=String(request.data?.adminPin || "").trim();
+  if(pin !== configuredOwnerPin()){
+    throw new HttpsError("permission-denied","رمز المالك غير صحيح.");
+  }
+  return {success:true};
+});
+
+exports.generateActivationCode=onCall({invoker:"public",secrets:[OWNER_ADMIN_PIN],enforceAppCheck:false},async(request)=>{
   const uid=requireAuth(request);
-  const pin=String(request.data?.adminPin || "");
-  if(pin !== OWNER_ADMIN_PIN){
+  const pin=String(request.data?.adminPin || "").trim();
+  if(pin !== configuredOwnerPin()){
     throw new HttpsError("permission-denied","رمز المالك غير صحيح.");
   }
 

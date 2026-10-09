@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
@@ -74,31 +73,56 @@ class DainPayBackupService {
     final aExists = await fileA.exists();
     final bExists = await fileB.exists();
 
+    // Always preserve the newest valid copy. Write over the missing, corrupt,
+    // or older slot instead of choosing a slot randomly.
+    final aTime = aExists ? await _validBackupTime(fileA, localKey) : null;
+    final bTime = bExists ? await _validBackupTime(fileB, localKey) : null;
+
     final File target;
-    if (!aExists && bExists) {
+    if (!aExists) {
       target = fileA;
-    } else if (aExists && !bExists) {
+    } else if (!bExists) {
+      target = fileB;
+    } else if (aTime == null) {
+      target = fileA;
+    } else if (bTime == null) {
       target = fileB;
     } else {
-      target =
-          DateTime.now().millisecondsSinceEpoch.isEven ? fileA : fileB;
+      target = aTime.isAfter(bTime) ? fileB : fileA;
     }
 
-    final temp = File('${target.path}.tmp');
+    final temp = File(
+      '${target.path}.${DateTime.now().microsecondsSinceEpoch}.tmp',
+    );
     await temp.writeAsString(encrypted, flush: true);
 
-    // Verify the encrypted envelope before replacing the previous good copy.
+    // Validate both the new encrypted envelope and its decrypted payload
+    // before replacing an older slot.
     await decrypt(encrypted, localKey);
-
     if (await target.exists()) {
       await target.delete();
     }
     await temp.rename(target.path);
 
-    // Verify the file after the atomic rename as well.
     final written = await target.readAsString();
     await decrypt(written, localKey);
     return true;
+  }
+
+  Future<DateTime?> _validBackupTime(File file, String localKey) async {
+    try {
+      final text = await file.readAsString();
+      final envelope = jsonDecode(text);
+      if (envelope is! Map ||
+          envelope['format'] != 'DainPay encrypted backup') {
+        return null;
+      }
+      await decrypt(text, localKey);
+      return DateTime.tryParse('${envelope['createdAt']}') ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<Map<String, dynamic>> restoreLocal({
@@ -140,21 +164,30 @@ class DainPayBackupService {
     return Map<String, dynamic>.from(candidates.first['payload'] as Map);
   }
 
-  Future<String?> _accessToken() async {
+  Future<String?> _accessToken({bool allowInteractiveSignIn = true}) async {
     try {
       GoogleSignInAccount? account = _google.currentUser;
       account ??= await _google.signInSilently();
-      account ??= await _google.signIn();
+      if (account == null && allowInteractiveSignIn) {
+        account = await _google.signIn();
+      }
       if (account == null) return null;
       final authentication = await account.authentication;
       return authentication.accessToken;
     } on PlatformException catch (e) {
+      // Android Google Sign-In commonly exposes status 10 in the exception
+      // message OR its string representation, depending on plugin version.
+      final diagnostic = '${e.message ?? ''} ${e.details ?? ''} $e'.toLowerCase();
       if (e.code == 'sign_in_failed' &&
-          (e.message ?? '').contains('api: 10')) {
+          (diagnostic.contains('api: 10') ||
+              diagnostic.contains('developer_error') ||
+              diagnostic.contains('status code: 10'))) {
         throw StateError(
-          'إعداد Google Drive غير مكتمل (API 10). '
-          'يجب تسجيل SHA-1 لشهادة إصدار التطبيق في Firebase، '
-          'تفعيل Google Sign-In وDrive API، ثم تنزيل google-services.json الجديد.',
+          'تعذر تسجيل الدخول إلى Google Drive (خطأ API 10). '
+          'هذه مشكلة إعداد للتطبيق: راجع اسم الحزمة وبصمتي SHA-1 وSHA-256 '
+          'لشهادة التوقيع المستخدمة في هذا الإصدار داخل Firebase وGoogle Cloud، '
+          'وتأكد من تفعيل Google Sign-In وGoogle Drive API، ثم حدّث '
+          'google-services.json وأعد بناء التطبيق. النسخة المحلية المشفرة تبقى متاحة.',
         );
       }
       rethrow;
@@ -233,7 +266,7 @@ class DainPayBackupService {
     return Map<String, dynamic>.from(payload);
   }
 
-  Future<String?> _findFile(String token) async {
+  Future<List<Map<String, dynamic>>> _findBackupFiles(String token) async {
     final query = Uri.encodeQueryComponent(
       "name = '$_fileName' and trashed = false and 'appDataFolder' in parents",
     );
@@ -241,7 +274,7 @@ class DainPayBackupService {
       'https://www.googleapis.com/drive/v3/files'
       '?spaces=appDataFolder'
       '&q=$query'
-      '&pageSize=10&orderBy=modifiedTime desc'
+      '&pageSize=100&orderBy=modifiedTime desc'
       '&fields=files(id,name,modifiedTime)',
     );
     final response = await _client.get(
@@ -251,13 +284,53 @@ class DainPayBackupService {
     if (response.statusCode != 200) {
       throw Exception('Drive list failed: ${response.statusCode}');
     }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map || decoded['files'] is! List) return <Map<String, dynamic>>[];
+    return List<Map<String, dynamic>>.from(
+      (decoded['files'] as List).whereType<Map>().map(
+            (item) => Map<String, dynamic>.from(item),
+          ),
+    );
+  }
 
-    final data = jsonDecode(response.body);
-    final files = data['files'];
-    if (files is List && files.isNotEmpty) {
-      return '${files.first['id']}';
+  Future<void> _pruneOldFiles(String token, {int keep = 5}) async {
+    try {
+      final query = Uri.encodeQueryComponent(
+        "name = '$_fileName' and trashed = false and 'appDataFolder' in parents",
+      );
+      final response = await _client.get(
+        Uri.parse(
+          'https://www.googleapis.com/drive/v3/files'
+          '?spaces=appDataFolder&q=$query&pageSize=100'
+          '&orderBy=modifiedTime desc&fields=files(id,name,modifiedTime)',
+        ),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (response.statusCode != 200) return;
+      final decoded = jsonDecode(response.body);
+      final files = decoded is Map && decoded['files'] is List
+          ? List<Map<String, dynamic>>.from(
+              (decoded['files'] as List).whereType<Map>().map(
+                    (item) => Map<String, dynamic>.from(item),
+                  ),
+            )
+          : <Map<String, dynamic>>[];
+      for (final oldFile in files.skip(keep)) {
+        final id = '${oldFile['id'] ?? ''}';
+        if (id.isEmpty) continue;
+        final deletion = await _client.delete(
+          Uri.parse('https://www.googleapis.com/drive/v3/files/$id'),
+          headers: {'Authorization': 'Bearer $token'},
+        );
+        if (deletion.statusCode < 200 || deletion.statusCode >= 300) {
+          debugPrint('Could not prune old Drive backup $id: ${deletion.statusCode}');
+        }
+      }
+    } catch (e) {
+      // Pruning is housekeeping only. Never fail a verified new backup
+      // because deletion of an old archive failed.
+      debugPrint('Drive backup pruning deferred: $e');
     }
-    return null;
   }
 
   Future<String> _upload(
@@ -361,8 +434,12 @@ class DainPayBackupService {
       if (token != null && account != null) {
         final driveKey = driveKeyForAccountId(account.id);
         final encrypted = await encrypt(payload, driveKey);
-        final existing = await _findFile(token);
-        await _upload(token, encrypted, fileId: existing);
+        // Create a new recovery point instead of overwriting the last
+        // known-good cloud backup. Keep the five newest snapshots.
+        final uploadedId = await _upload(token, encrypted);
+        final uploadedContent = await _download(token, uploadedId);
+        await decrypt(uploadedContent, driveKey);
+        await _pruneOldFiles(token);
         cloudSaved = true;
       }
     } catch (e) {
@@ -401,6 +478,45 @@ class DainPayBackupService {
     );
   }
 
+  /// Silent cloud backup for autosave. Never opens an account chooser.
+  /// Interactive account selection remains available through [backup].
+  Future<DainPayBackupResult> backupIfSignedIn({
+    required Map<String, dynamic> payload,
+  }) async {
+    try {
+      final token = await _accessToken(allowInteractiveSignIn: false);
+      final account = _google.currentUser;
+      if (token == null || account == null) {
+        return const DainPayBackupResult(
+          success: false,
+          message: 'لم يتم اختيار حساب Google للنسخ التلقائي.',
+        );
+      }
+      final encrypted = await encrypt(
+        payload,
+        driveKeyForAccountId(account.id),
+      );
+      // Preserve a rolling history so accidental edits/deletions can be
+      // recovered from a previous verified backup.
+      final uploadedId = await _upload(token, encrypted);
+      final uploadedContent = await _download(token, uploadedId);
+      await decrypt(uploadedContent, driveKeyForAccountId(account.id));
+      await _pruneOldFiles(token);
+      return DainPayBackupResult(
+        success: true,
+        message: 'تم تحديث النسخة الاحتياطية تلقائيًا.',
+        accountEmail: account.email,
+        cloudSaved: true,
+      );
+    } catch (e) {
+      debugPrint('Silent Google Drive backup failed: $e');
+      return DainPayBackupResult(
+        success: false,
+        message: 'تعذر تحديث النسخة السحابية تلقائيًا: $e',
+      );
+    }
+  }
+
   Future<Map<String, dynamic>> restore() async {
     final token = await _accessToken();
     final account = _google.currentUser;
@@ -409,15 +525,28 @@ class DainPayBackupService {
       throw StateError('اختر حساب Google أولاً');
     }
 
-    final fileId = await _findFile(token);
-    if (fileId == null) {
+    final files = await _findBackupFiles(token);
+    if (files.isEmpty) {
       throw StateError('لا توجد نسخة احتياطية لهذا الحساب');
     }
 
-    final encrypted = await _download(token, fileId);
-    return decrypt(
-      encrypted,
-      driveKeyForAccountId(account.id),
+    Object? lastError;
+    final driveKey = driveKeyForAccountId(account.id);
+    // Try newest first, then fall back to an older recovery point if the
+    // latest file is damaged or incomplete.
+    for (final file in files) {
+      final fileId = '${file['id'] ?? ''}';
+      if (fileId.isEmpty) continue;
+      try {
+        final encrypted = await _download(token, fileId);
+        return await decrypt(encrypted, driveKey);
+      } catch (e) {
+        lastError = e;
+        debugPrint('Drive backup candidate rejected ($fileId): $e');
+      }
+    }
+    throw StateError(
+      'تعذر فتح النسخ السحابية المتاحة. قد تكون تالفة أو لا تخص هذا الحساب. $lastError',
     );
   }
 

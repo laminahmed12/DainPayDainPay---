@@ -8,7 +8,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'backup_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -21,7 +20,6 @@ const Color mint = Color(0xFF2EC4B6);
 const Color burgundy = Color(0xFFE63946);
 
 const int trialLengthDays = 7;
-const String adminPin = '116936';
 const String appTitle = 'DainPay — دَيْن';
 const String functionsRegion = 'us-central1';
 
@@ -76,6 +74,19 @@ String dateText(DateTime date) {
 String timeText(DateTime date) {
   return '${date.hour.toString().padLeft(2, '0')}:'
       '${date.minute.toString().padLeft(2, '0')}';
+}
+
+String? selectArabicSpeechLocale(Iterable<String> localeIds) {
+  final locales = localeIds.toList(growable: false);
+  for (final localeId in locales) {
+    final normalized = localeId.toLowerCase().replaceAll('_', '-');
+    if (normalized == 'ar-ly') return localeId;
+  }
+  for (final localeId in locales) {
+    final normalized = localeId.toLowerCase().replaceAll('_', '-');
+    if (normalized == 'ar' || normalized.startsWith('ar-')) return localeId;
+  }
+  return null;
 }
 
 String _digits(String value) {
@@ -233,12 +244,13 @@ String buildAccountStatement(Store store, Customer customer) {
     '',
     'إجمالي الديون: ${money(debt)}',
     'إجمالي المسدد: ${money(paid)}',
-    'المتبقي: ${money(balance)}',
+    'الدين المتبقي: ${money(balance)}',
     if (store.prepaidCredit(customer.id) > 0)
-      'الرصيد المسبق: ${money(store.prepaidCredit(customer.id))}',
-    'الحالة: ${balance <= 0
-        ? (store.prepaidCredit(customer.id) > 0 ? 'له رصيد مسبق' : 'مسدد')
-        : 'عليه رصيد'}',
+      'الرصيد الدائن لصالح العميل: ${money(store.prepaidCredit(customer.id))}',
+    'الرصيد الفعلي للحساب: ${money(store.prepaidCredit(customer.id) > 0 ? store.prepaidCredit(customer.id) : balance)}',
+    'الحالة: ${balance > 0
+        ? 'عليه دين'
+        : (store.prepaidCredit(customer.id) > 0 ? 'له رصيد دائن' : 'مسدد')}',
     '',
     'تفاصيل العمليات:',
   ];
@@ -259,7 +271,8 @@ String buildAccountStatement(Store store, Customer customer) {
   lines.addAll([
     '',
     '------------------------------',
-    'المتبقي المطلوب: ${money(balance)}',
+    'الدين المتبقي: ${money(balance)}',
+    'الرصيد الفعلي للحساب: ${money(store.prepaidCredit(customer.id) > 0 ? store.prepaidCredit(customer.id) : balance)}',
   ]);
 
   return lines.join('\\n');
@@ -437,6 +450,7 @@ class Store extends ChangeNotifier {
 
   final DainPayBackupService backupService = DainPayBackupService();
   String localBackupKey = '';
+  String ownerPinSession = '';
   DateTime? lastBackupAt;
   DateTime? lastLocalBackupAt;
   String backupGoogleEmail = '';
@@ -445,8 +459,6 @@ class Store extends ChangeNotifier {
   Timer? _localBackupTimer;
 
   bool _disposed = false;
-  bool _syncQueued = false;
-  Future<void>? _syncFuture;
 
   static Future<Store> load() async {
     final store = Store();
@@ -461,14 +473,25 @@ class Store extends ChangeNotifier {
     store.localBackupKey =
         await store.secureStorage.read(key: 'dainpay_local_backup_key') ?? '';
     if (store.localBackupKey.isEmpty) {
-      store.localBackupKey =
+      // Preserve existing encrypted backups while migrating the legacy key.
+      final legacyKey =
           store.prefs.getString('dainpay_local_backup_key') ?? '';
-      if (store.localBackupKey.isNotEmpty) {
+      if (legacyKey.isNotEmpty) {
         await store.secureStorage.write(
           key: 'dainpay_local_backup_key',
-          value: store.localBackupKey,
+          value: legacyKey,
         );
+        store.localBackupKey =
+            await store.secureStorage.read(key: 'dainpay_local_backup_key') ?? '';
+        if (store.localBackupKey.isEmpty) {
+          throw StateError('تعذر ترحيل مفتاح النسخة الاحتياطية بأمان.');
+        }
+        await store.prefs.remove('dainpay_local_backup_key');
       }
+    }
+    if (store.localBackupKey.isNotEmpty &&
+        store.prefs.containsKey('dainpay_local_backup_key')) {
+      await store.prefs.remove('dainpay_local_backup_key');
     }
     final lastBackup = store.prefs.getString('last_backup_at');
     store.lastBackupAt =
@@ -532,9 +555,11 @@ class Store extends ChangeNotifier {
 
   Future<void> _pref(Future<bool> Function() action) async {
     try {
-      await action();
+      final saved = await action();
+      if (!saved) throw StateError('SharedPreferences write returned false.');
     } catch (e) {
       debugPrint('SharedPreferences error: $e');
+      rethrow;
     }
   }
 
@@ -699,6 +724,33 @@ class Store extends ChangeNotifier {
                 'last_local_backup_at',
                 lastLocalBackupAt!.toIso8601String(),
               ));
+
+          // If this customer previously selected a Google account, update
+          // Drive silently in the background. Never open the account chooser
+          // while the customer is adding a debt or payment.
+          final previousCloudBackup = lastBackupAt;
+          final cloudBackupDue = previousCloudBackup == null ||
+              DateTime.now().difference(previousCloudBackup) >=
+                  const Duration(minutes: 2);
+          if (cloudBackupDue) {
+            final cloud = await backupService.backupIfSignedIn(
+              payload: backupPayload(),
+            );
+            if (cloud.cloudSaved) {
+            lastBackupAt = DateTime.now();
+            backupGoogleEmail = cloud.accountEmail ?? backupGoogleEmail;
+            await _pref(() => prefs.setString(
+                  'last_backup_at',
+                  lastBackupAt!.toIso8601String(),
+                ));
+              if (backupGoogleEmail.isNotEmpty) {
+                await _pref(() => prefs.setString(
+                      'backup_google_email',
+                      backupGoogleEmail,
+                    ));
+              }
+            }
+          }
           safeNotify();
         }
       } catch (e) {
@@ -822,9 +874,11 @@ class Store extends ChangeNotifier {
         key: 'dainpay_local_backup_key',
         value: localBackupKey,
       );
-      await _pref(
-        () => prefs.setString('dainpay_local_backup_key', localBackupKey),
-      );
+      final storedKey = await secureStorage.read(key: 'dainpay_local_backup_key');
+      if (storedKey != localBackupKey) {
+        throw StateError('تعذر حفظ مفتاح النسخة الاحتياطية في التخزين الآمن.');
+      }
+      await prefs.remove('dainpay_local_backup_key');
     }
     return localBackupKey;
   }
@@ -976,6 +1030,19 @@ class Store extends ChangeNotifier {
       }
     }
 
+    // Protect the current data before applying a restore. If the current
+    // device has records and its safety snapshot cannot be verified, abort
+    // instead of risking an irreversible overwrite.
+    if (customers.isNotEmpty || transactions.isNotEmpty || voiceDrafts.isNotEmpty) {
+      final safetyCopy = await createLocalBackupNow();
+      if (!safetyCopy.success || !safetyCopy.localSaved) {
+        return const DainPayBackupResult(
+          success: false,
+          message: 'أوقفنا الاستعادة لحماية البيانات الحالية؛ تعذر إنشاء نسخة أمان منها. حاول مرة أخرى بعد توفير مساحة تخزين.',
+        );
+      }
+    }
+
     customers
       ..clear()
       ..addAll(restoredCustomers);
@@ -1049,7 +1116,9 @@ class Store extends ChangeNotifier {
 
   String risk(String customerId) {
     final current = balance(customerId);
-    if (current <= 0) return 'مسدد';
+    if (current <= 0) {
+      return prepaidCredit(customerId) > 0 ? 'له رصيد دائن' : 'مسدد';
+    }
 
     final debtsForCustomer = transactions
         .where((t) => t.customerId == customerId && t.type == 'debt')
@@ -1091,122 +1160,103 @@ class Store extends ChangeNotifier {
       }
       return false;
     } on FirebaseFunctionsException catch (e) {
+      // Activation codes are server-managed; Firestore rules intentionally
+      // deny client access. Never fall back to a direct client-side redemption.
       debugPrint('Activation function error: ${e.code}: ${e.message ?? ''}');
-      if (!{
-        'permission-denied',
-        'not-found',
-        'unavailable',
-        'deadline-exceeded',
-        'unauthenticated',
-      }.contains(e.code)) {
-        return false;
-      }
-      try {
-        final ref = activationCodesRef.doc(clean);
-        final redeemed = await FirebaseFirestore.instance.runTransaction<bool>((tx) async {
-          final snap = await tx.get(ref);
-          if (!snap.exists) return false;
-          final data = snap.data() ?? <String, dynamic>{};
-          if (data['used'] == true) return false;
-          tx.update(ref, {
-            'used': true,
-            'usedAt': FieldValue.serverTimestamp(),
-            'usedUid': uid,
-            'usedDeviceId': deviceId,
-          });
-          return true;
-        });
-        if (!redeemed) return false;
-        await userRef.doc(uid).set({
-          'activated': true,
-          'activatedAt': FieldValue.serverTimestamp(),
-          'activatedDeviceId': deviceId,
-        }, SetOptions(merge: true));
-        activated = true;
-        await saveLocal();
-        safeNotify();
-        return true;
-      } catch (fallbackError) {
-        debugPrint('Activation fallback error: $fallbackError');
-        return false;
-      }
+      return false;
     } catch (e) {
       debugPrint('Activation error: $e');
       return false;
     }
   }
 
+  Future<bool> verifyOwnerPin(String pin) async {
+    if (!firebaseReady || uid.isEmpty) {
+      throw StateError('يلزم الاتصال بالإنترنت للتحقق من رمز المالك.');
+    }
+    final normalizedPin = _digits(pin).trim();
+    if (!RegExp(r'^\d{6,12}$').hasMatch(normalizedPin)) return false;
+    try {
+      final callable = FirebaseFunctions.instanceFor(region: functionsRegion)
+          .httpsCallable('verifyOwnerPin');
+      final result = await callable.call({'adminPin': normalizedPin});
+      final data = result.data;
+      if (data is Map && data['success'] == true) {
+        ownerPinSession = normalizedPin;
+        isAdmin = true;
+        safeNotify();
+        return true;
+      }
+      return false;
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('Owner verification failed: ${e.code}: ${e.message ?? ''}');
+      if (e.code == 'permission-denied') return false;
+      if (e.code == 'not-found') {
+        throw StateError(
+          'خدمة التحقق من رمز المالك غير موجودة في مشروع Firebase الحالي. '
+          'يجب نشر دالة verifyOwnerPin في المنطقة us-central1؛ '
+          'لم يتم استبدال التحقق الآمن بأي تحقق محلي.',
+        );
+      }
+      if (e.code == 'failed-precondition') {
+        throw StateError(
+          'خدمة Firebase تعمل، لكن إعداد رمز المالك السري غير مكتمل في Secret Manager.',
+        );
+      }
+      throw StateError('تعذر التحقق من رمز المالك حالياً: ' + e.code);
+    }
+  }
+
   Future<String?> generateCode() async {
-    if (!firebaseReady || !isAdmin || uid.isEmpty) {
+    if (!firebaseReady || !isAdmin || ownerPinSession.isEmpty || uid.isEmpty) {
       throw StateError('تعذر الاتصال بحساب المالك في Firebase.');
     }
-
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       throw StateError('جلسة Firebase غير جاهزة. أعد المحاولة بعد لحظات.');
     }
-
     try {
       await user.getIdToken();
-
-      final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
+      final callable = FirebaseFunctions.instanceFor(region: functionsRegion)
           .httpsCallable(
             'generateActivationCode',
-            options: HttpsCallableOptions(
-              timeout: const Duration(seconds: 30),
-            ),
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
           );
-
       final result = await callable.call({
-        'adminPin': adminPin,
+        'adminPin': ownerPinSession,
         'deviceId': deviceId,
       });
-
       final data = result.data;
       if (data is Map && data['success'] == true && data['code'] is String) {
         return data['code'] as String;
       }
-
       throw StateError('خدمة التفعيل أعادت استجابة غير صالحة.');
     } on FirebaseFunctionsException catch (e) {
-      debugPrint(
-        'Generate activation function error: ${e.code}: ${e.message ?? ''}',
-      );
-
-      switch (e.code) {
-        case 'permission-denied':
-          throw StateError(
-            'خدمة توليد رمز التفعيل رفضت الطلب. تأكد أن دالة generateActivationCode منشورة في Firebase وأن جلسة المالك صالحة.',
-          );
-        case 'unauthenticated':
-          throw StateError('جلسة Firebase منتهية. أعد المحاولة.');
-        case 'not-found':
-          throw StateError(
-            'خدمة التفعيل غير منشورة في Firebase أو المنطقة غير صحيحة.',
-          );
-        case 'unavailable':
-        case 'deadline-exceeded':
-          throw StateError(
-            'خدمة التفعيل غير متاحة حالياً. تحقق من اتصال الإنترنت ثم أعد المحاولة.',
-          );
-        case 'invalid-argument':
-          throw StateError('بيانات طلب التفعيل غير صحيحة.');
-        default:
-          throw StateError(
-            'تعذر توليد رمز التفعيل حالياً. رمز الخطأ: ${e.code}.',
-          );
+      debugPrint('Generate activation function error: ' + e.code);
+      if (e.code == 'permission-denied') {
+        throw StateError('رمز المالك غير صحيح أو أن صلاحية التوليد غير متاحة.');
       }
+      if (e.code == 'unauthenticated') {
+        throw StateError('جلسة Firebase منتهية. أعد المحاولة.');
+      }
+      if (e.code == 'not-found') {
+        throw StateError('خدمة التفعيل غير منشورة في Firebase أو المنطقة غير صحيحة.');
+      }
+      if (e.code == 'unavailable' || e.code == 'deadline-exceeded') {
+        throw StateError('خدمة التفعيل غير متاحة حالياً. تحقق من اتصال الإنترنت ثم أعد المحاولة.');
+      }
+      throw StateError('تعذر توليد رمز التفعيل حالياً. رمز الخطأ: ' + e.code);
     } catch (e) {
-      debugPrint('Generate activation error: $e');
+      debugPrint('Generate activation error: ' + e.toString());
       if (e is StateError) rethrow;
       throw StateError('تعذر توليد رمز التفعيل حالياً.');
     }
   }
-  bool checkAdminLocal(String pin) {
-    final valid = _digits(pin).trim() == adminPin;
-    isAdmin = valid;
+
+  void endAdminSession() {
+    ownerPinSession = '';
+    isAdmin = false;
     safeNotify();
-    return valid;
   }
 }
 
@@ -1350,27 +1400,65 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final store = widget.store;
 
-    final filtered = store.customers.where((customer) {
-      final balance = store.balance(customer.id);
-      final normalizedQuery = _digits(query);
+    // Aggregate transactions once per rebuild. Previously each customer balance
+    // rescanned the full ledger several times during every tap/search/rebuild,
+    // which made the interface progressively slower as data grew.
+    final netByCustomer = <String, int>{};
+    final debtsByCustomer = <String, int>{};
+    final paidByCustomer = <String, int>{};
+    final firstDebtByCustomer = <String, DateTime>{};
+    for (final tx in store.transactions) {
+      final id = tx.customerId;
+      if (tx.type == 'debt') {
+        netByCustomer.update(id, (value) => value + tx.amountCents,
+            ifAbsent: () => tx.amountCents);
+        debtsByCustomer.update(id, (value) => value + tx.amountCents,
+            ifAbsent: () => tx.amountCents);
+        final first = firstDebtByCustomer[id];
+        if (first == null || tx.date.isBefore(first)) {
+          firstDebtByCustomer[id] = tx.date;
+        }
+      } else {
+        netByCustomer.update(id, (value) => value - tx.amountCents,
+            ifAbsent: () => -tx.amountCents);
+        paidByCustomer.update(id, (value) => value + tx.amountCents,
+            ifAbsent: () => tx.amountCents);
+      }
+    }
+    int balanceFor(String id) => max(0, netByCustomer[id] ?? 0);
+    int creditFor(String id) => max(0, -(netByCustomer[id] ?? 0));
+    String riskFor(String id) {
+      final current = balanceFor(id);
+      if (current <= 0) return creditFor(id) > 0 ? 'له رصيد دائن' : 'مسدد';
+      final firstDebt = firstDebtByCustomer[id];
+      if (firstDebt == null) return 'حديث';
+      final days = DateTime.now().difference(firstDebt).inDays;
+      if (days > 90) return 'خطر';
+      if (days > 30) return 'متأخر';
+      return 'حديث';
+    }
 
+    final normalizedQuery = _digits(query);
+    final filtered = store.customers.where((customer) {
+      final balance = balanceFor(customer.id);
       final matchesSearch = query.isEmpty ||
           customer.name.contains(query) ||
           customer.phone.contains(query) ||
           _digits(customer.phone).contains(normalizedQuery);
-
       final matchesFilter = filter == 'all' ||
           (filter == 'debt' && balance > 0) ||
           (filter == 'paid' && balance <= 0);
-
       return matchesSearch && matchesFilter;
     }).toList()
-      ..sort((a, b) => store.balance(b.id).compareTo(store.balance(a.id)));
+      ..sort((a, b) =>
+          balanceFor(b.id).compareTo(balanceFor(a.id)));
 
     final total = store.customers.fold<int>(
       0,
-      (sum, customer) => sum + max(0, store.balance(customer.id)),
+      (sum, customer) => sum + balanceFor(customer.id),
     );
+    final debtCustomerCount =
+        store.customers.where((customer) => balanceFor(customer.id) > 0).length;
 
     return Scaffold(
       appBar: AppBar(
@@ -1470,14 +1558,14 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     Expanded(
                       child: _Stat(
-                          title: 'إجمالي المتبقي',
+                          title: 'إجمالي الديون المتبقية',
                           value: money(total),
                           color: burgundy),
                     ),
                     Expanded(
                       child: _Stat(
                           title: 'العملاء عليهم دَين',
-                          value: '${filtered.length}',
+                          value: '$debtCustomerCount',
                           color: emerald),
                     ),
                   ],
@@ -1521,7 +1609,7 @@ class _HomePageState extends State<HomePage> {
                   onSelected: (_) => setState(() => filter = 'debt'),
                 ),
                 ChoiceChip(
-                  label: const Text('مسدد'),
+                  label: const Text('مسدد / له رصيد'),
                   selected: filter == 'paid',
                   onSelected: (_) => setState(() => filter = 'paid'),
                 ),
@@ -1541,7 +1629,9 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
             ...filtered.map((customer) {
-              final customerBalance = store.balance(customer.id);
+              final customerBalance = balanceFor(customer.id);
+              final customerCredit = creditFor(customer.id);
+              final displayedBalance = customerCredit > 0 ? customerCredit : customerBalance;
               return Card(
                 child: ListTile(
                   onTap: () {
@@ -1564,13 +1654,13 @@ class _HomePageState extends State<HomePage> {
                       style: const TextStyle(fontWeight: FontWeight.bold)),
                   subtitle: Text(
                     '${customer.phone}\n'
-                    '${store.risk(customer.id)} • '
-                    'دَين ${money(store.debts(customer.id))} • '
-                    'مسدد ${money(store.paid(customer.id))}',
+                    '${riskFor(customer.id)} • '
+                    'دَين ${money(debtsByCustomer[customer.id] ?? 0)} • '
+                    'مسدد ${money(paidByCustomer[customer.id] ?? 0)}',
                   ),
                   isThreeLine: true,
                   trailing: Text(
-                    money(customerBalance),
+                    money(displayedBalance),
                     style: TextStyle(
                       fontWeight: FontWeight.w900,
                       color: customerBalance > 0 ? burgundy : mint,
@@ -1838,12 +1928,19 @@ class CustomerPage extends StatelessWidget {
                   const Icon(Icons.account_balance_wallet_rounded,
                       size: 36, color: emerald),
                   Text(
-                    money(store.balance(customer.id)),
+                    money(store.prepaidCredit(customer.id) > 0
+                        ? store.prepaidCredit(customer.id)
+                        : store.balance(customer.id)),
                     style: const TextStyle(
                         fontSize: 30, fontWeight: FontWeight.w900),
                   ),
                   Text(
-                    'الدَين ${money(store.debts(customer.id))} • '
+                    store.prepaidCredit(customer.id) > 0
+                        ? 'رصيد دائن لصالح العميل'
+                        : 'الدَين المتبقي • ${money(store.balance(customer.id))}',
+                  ),
+                  Text(
+                    'إجمالي الديون ${money(store.debts(customer.id))} • '
                     'المسدد ${money(store.paid(customer.id))}',
                   ),
                   if (store.prepaidCredit(customer.id) > 0)
@@ -2169,7 +2266,37 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
   final speech = stt.SpeechToText();
   bool listening = false;
   bool initializing = false;
+  bool _draftSavedForSession = false;
   String live = '';
+
+  Future<void> _saveVoiceDraft(String text) async {
+    final recognized = text.trim();
+    if (_draftSavedForSession || recognized.isEmpty) return;
+    _draftSavedForSession = true;
+    try {
+      widget.store.voiceDrafts.insert(
+        0,
+        VoiceDraft(
+          id: makeId(),
+          text: recognized,
+          date: DateTime.now(),
+          customerId: findCustomer(recognized),
+          amountCents: amountCentsFromText(recognized) ?? 0,
+          note: recognized,
+        ),
+      );
+      await widget.store.saveLocal();
+      widget.store.safeNotify();
+    } catch (e) {
+      _draftSavedForSession = false;
+      debugPrint('Voice draft save failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم التعرف على الكلام لكن تعذر حفظ المسودة. حاول الحفظ مرة أخرى.')),
+        );
+      }
+    }
+  }
 
   int? amountCentsFromText(String text) {
     final normalized = _digits(text);
@@ -2214,44 +2341,6 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     return '';
   }
 
-  Future<bool> _ensureMicrophonePermission() async {
-    var status = await Permission.microphone.status;
-    if (status.isGranted) return true;
-
-    status = await Permission.microphone.request();
-    if (status.isGranted) return true;
-
-    if (status.isPermanentlyDenied && mounted) {
-      await showDialog<void>(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('صلاحية الميكروفون'),
-          content: const Text(
-            'التسجيل الصوتي يحتاج صلاحية الميكروفون. افتح إعدادات التطبيق وفعّل الميكروفون ثم عد إلى DainPay.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('إلغاء'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                Navigator.pop(context);
-                await openAppSettings();
-              },
-              child: const Text('فتح الإعدادات'),
-            ),
-          ],
-        ),
-      );
-    } else if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('يلزم السماح للميكروفون لاستخدام التسجيل الصوتي.')),
-      );
-    }
-    return false;
-  }
-
   Future<void> record() async {
     if (initializing) return;
 
@@ -2266,10 +2355,9 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     initializing = true;
 
     try {
-      if (!await _ensureMicrophonePermission()) return;
-      await speech.cancel();
+      // Keep the proven v81 flow: initialize speech, then request Libyan
+      // Arabic directly instead of enumerating locales before listening.
       final available = await speech.initialize(
-        debugLogging: false,
         onStatus: (status) {
           if (!mounted) return;
           if (status == 'notListening' || status == 'done') {
@@ -2280,39 +2368,14 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           debugPrint('Speech error: $error');
           if (!mounted) return;
           setState(() => listening = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'تعذر تشغيل التعرف الصوتي. تحقق من الميكروفون وخدمة التعرف الصوتي.',
-              ),
-            ),
-          );
         },
       );
 
       if (!available) {
         if (mounted) {
-          await showDialog<void>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text('التعرف الصوتي غير متاح'),
-              content: const Text(
-                'لم يتمكن DainPay من تشغيل خدمة التعرف الصوتي. '
-                'تأكد من منح الميكروفون صلاحية الاستخدام وأن خدمة التعرف الصوتي في الهاتف مفعلة، ثم أعد المحاولة.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('إغلاق'),
-                ),
-                FilledButton(
-                  onPressed: () async {
-                    Navigator.pop(context);
-                    await openAppSettings();
-                  },
-                  child: const Text('إعدادات التطبيق'),
-                ),
-              ],
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون'),
             ),
           );
         }
@@ -2320,51 +2383,19 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       }
 
       if (!mounted) return;
-
-      final locales = await speech.locales();
-      String? arabicLocale;
-      for (final locale in locales) {
-        if (locale.localeId.toLowerCase() == 'ar-ly') {
-          arabicLocale = locale.localeId;
-          break;
-        }
-      }
-      arabicLocale ??= locales
-          .where((locale) => locale.localeId.toLowerCase().startsWith('ar-'))
-          .map((locale) => locale.localeId)
-          .firstOrNull;
-
+      _draftSavedForSession = false;
+      live = '';
       setState(() => listening = true);
 
       await speech.listen(
-        listenOptions: stt.SpeechListenOptions(
-          localeId: arabicLocale ?? 'ar-LY',
-          partialResults: true,
-          cancelOnError: true,
-        ),
+        localeId: 'ar-LY',
         onResult: (result) async {
           if (!mounted) return;
           setState(() => live = result.recognizedWords);
 
           if (!result.finalResult) return;
 
-          final text = result.recognizedWords.trim();
-          if (text.isNotEmpty) {
-            widget.store.voiceDrafts.insert(
-              0,
-              VoiceDraft(
-                id: makeId(),
-                text: text,
-                date: DateTime.now(),
-                customerId: findCustomer(text),
-                amountCents: amountCentsFromText(text) ?? 0,
-                note: text,
-              ),
-            );
-            await widget.store.saveLocal();
-            widget.store.safeNotify();
-          }
-
+          await _saveVoiceDraft(result.recognizedWords);
           if (mounted) setState(() => listening = false);
         },
       );
@@ -2373,12 +2404,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       if (mounted) {
         setState(() => listening = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'تعذر تشغيل التعرف الصوتي. تحقق من صلاحية الميكروفون '
-              'وخدمة التعرف الصوتي في الهاتف.',
-            ),
-          ),
+          const SnackBar(content: Text('تعذر تشغيل التسجيل الصوتي')),
         );
       }
     } finally {
@@ -2686,10 +2712,12 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           SwitchListTile(
             value: store.dark,
-            onChanged: (value) async {
+            onChanged: (value) {
+              // Notify MaterialApp immediately so the theme changes without
+              // waiting for disk writes or the background encrypted backup.
               setState(() => store.dark = value);
-              await store.saveLocal();
               store.safeNotify();
+              unawaited(store.saveLocal());
             },
             title: const Text('الوضع الداكن'),
           ),
@@ -2859,7 +2887,7 @@ class _ActivationPageState extends State<ActivationPage> {
     super.dispose();
   }
 
-  Future<void> activate() async {
+  Future<void> redeemActivation() async {
     if (busy) return;
 
     if (!widget.store.firebaseReady) {
@@ -2932,11 +2960,11 @@ class _ActivationPageState extends State<ActivationPage> {
             keyboardType: TextInputType.number,
             textInputAction: TextInputAction.done,
             decoration: const InputDecoration(labelText: 'كود التفعيل'),
-            onSubmitted: (_) => activate(),
+            onSubmitted: (_) => redeemActivation(),
           ),
           const SizedBox(height: 12),
           FilledButton(
-            onPressed: busy ? null : activate,
+            onPressed: busy ? null : redeemActivation,
             child: Text(busy ? 'جارٍ التحقق...' : 'تفعيل دائم'),
           ),
         ],
@@ -2964,21 +2992,28 @@ class _AdminGateState extends State<AdminGate> {
     super.dispose();
   }
 
-  void enter() {
+  Future<void> enter() async {
     if (busy) return;
-
-    final navigator = Navigator.of(context);
-    final valid = widget.store.checkAdminLocal(pin.text);
-
-    if (valid) {
-      navigator.pop();
-      navigator.push(
-        MaterialPageRoute(builder: (_) => AdminPage(store: widget.store)),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('رمز المالك غير صحيح')),
-      );
+    setState(() => busy = true);
+    try {
+      final valid = await widget.store.verifyOwnerPin(pin.text);
+      if (!mounted) return;
+      if (valid) {
+        Navigator.of(context).pop();
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => AdminPage(store: widget.store)),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('رمز المالك غير صحيح')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      }
+    } finally {
+      if (mounted) setState(() => busy = false);
     }
   }
 
@@ -2999,8 +3034,10 @@ class _AdminGateState extends State<AdminGate> {
           child: const Text('إلغاء'),
         ),
         FilledButton(
-          onPressed: enter,
-          child: const Text('دخول'),
+          onPressed: busy ? null : enter,
+          child: busy
+              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('دخول'),
         ),
       ],
     );
@@ -3022,6 +3059,7 @@ class _AdminPageState extends State<AdminPage> {
 
   @override
   void dispose() {
+    widget.store.endAdminSession();
     super.dispose();
   }
 

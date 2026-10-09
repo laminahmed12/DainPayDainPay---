@@ -83,7 +83,7 @@ jobs:
                         else '    id "com.google.gms.google-services"')
               text = text.replace('plugins {', 'plugins {' + chr(10) + plugin, 1)
           text = text.replace('flutter.minSdkVersion', '23')
-          text = text.replace('flutter.compileSdkVersion', '35')
+          text = text.replace('flutter.compileSdkVersion', '36')
           text = text.replace('flutter.targetSdkVersion', '35')
           app.write_text(text)
           PY

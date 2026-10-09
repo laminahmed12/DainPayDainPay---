@@ -1025,6 +1025,19 @@ class Store extends ChangeNotifier {
       }
     }
 
+    // Protect the current data before applying a restore. If the current
+    // device has records and its safety snapshot cannot be verified, abort
+    // instead of risking an irreversible overwrite.
+    if (customers.isNotEmpty || transactions.isNotEmpty || voiceDrafts.isNotEmpty) {
+      final safetyCopy = await createLocalBackupNow();
+      if (!safetyCopy.success || !safetyCopy.localSaved) {
+        return const DainPayBackupResult(
+          success: false,
+          message: 'أوقفنا الاستعادة لحماية البيانات الحالية؛ تعذر إنشاء نسخة أمان منها. حاول مرة أخرى بعد توفير مساحة تخزين.',
+        );
+      }
+    }
+
     customers
       ..clear()
       ..addAll(restoredCustomers);

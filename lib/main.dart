@@ -2394,55 +2394,27 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     initializing = true;
 
     try {
-      if (!await _ensureMicrophonePermission()) return;
-      await speech.cancel();
+      // Keep the proven v81 flow: initialize speech, then request Libyan
+      // Arabic directly instead of enumerating locales before listening.
       final available = await speech.initialize(
-        debugLogging: false,
         onStatus: (status) {
+          if (!mounted) return;
           if (status == 'notListening' || status == 'done') {
-            // Some Android speech providers stop without delivering a separate
-            // finalResult callback. Persist the latest partial transcript too.
-            unawaited(_saveVoiceDraft(live));
-            if (mounted) setState(() => listening = false);
+            setState(() => listening = false);
           }
         },
         onError: (error) {
           debugPrint('Speech error: $error');
           if (!mounted) return;
           setState(() => listening = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'تعذر تشغيل التعرف الصوتي. تحقق من الميكروفون وخدمة التعرف الصوتي.',
-              ),
-            ),
-          );
         },
       );
 
       if (!available) {
         if (mounted) {
-          await showDialog<void>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text('التعرف الصوتي غير متاح'),
-              content: const Text(
-                'لم يتمكن DainPay من تشغيل خدمة التعرف الصوتي. '
-                'تأكد من منح الميكروفون صلاحية الاستخدام وأن خدمة التعرف الصوتي في الهاتف مفعلة، ثم أعد المحاولة.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('إغلاق'),
-                ),
-                FilledButton(
-                  onPressed: () async {
-                    Navigator.pop(context);
-                    await openAppSettings();
-                  },
-                  child: const Text('إعدادات التطبيق'),
-                ),
-              ],
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('التعرف الصوتي غير متاح أو لا توجد صلاحية للميكروفون'),
             ),
           );
         }
@@ -2450,51 +2422,20 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       }
 
       if (!mounted) return;
-
-      final locales = await speech.locales();
-      // Android speech providers may report generic Arabic as "ar"
-      // rather than a regional locale such as "ar-LY" or "ar-SA".
-      // Accept both forms and prefer Libyan Arabic when available.
-      final arabicLocale = selectArabicSpeechLocale(
-        locales.map((locale) => locale.localeId),
-      );
-
-      if (arabicLocale == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'لا توجد خدمة تعرّف صوتي باللغة العربية على الهاتف. فعّل أو ثبّت خدمة Google Speech Services ثم أعد المحاولة.',
-              ),
-            ),
-          );
-        }
-        return;
-      }
-
       _draftSavedForSession = false;
       live = '';
       setState(() => listening = true);
 
       await speech.listen(
-        listenFor: const Duration(seconds: 60),
-        pauseFor: const Duration(seconds: 5),
-        listenOptions: stt.SpeechListenOptions(
-          localeId: arabicLocale,
-          partialResults: true,
-          cancelOnError: false,
-        ),
+        localeId: 'ar-LY',
         onResult: (result) async {
           if (!mounted) return;
           setState(() => live = result.recognizedWords);
 
           if (!result.finalResult) return;
 
-          final text = result.recognizedWords.trim();
-          if (result.finalResult) {
-            await _saveVoiceDraft(text);
-            if (mounted) setState(() => listening = false);
-          }
+          await _saveVoiceDraft(result.recognizedWords);
+          if (mounted) setState(() => listening = false);
         },
       );
     } catch (e) {
@@ -2502,12 +2443,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       if (mounted) {
         setState(() => listening = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'تعذر تشغيل التعرف الصوتي. تحقق من صلاحية الميكروفون '
-              'وخدمة التعرف الصوتي في الهاتف.',
-            ),
-          ),
+          const SnackBar(content: Text('تعذر تشغيل التسجيل الصوتي')),
         );
       }
     } finally {

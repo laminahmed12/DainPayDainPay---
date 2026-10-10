@@ -1066,7 +1066,7 @@ class Store extends ChangeNotifier {
   }
 
   Future<bool> activateCode(String code) async {
-    final cleanCode = _digits(code).trim().replaceAll(RegExp(r'\\s+'), '');
+    final cleanCode = _digits(code).trim().replaceAll(RegExp(r'\s+'), '');
     if (cleanCode.isEmpty) return false;
     try {
       final response = await http.post(
@@ -2871,7 +2871,10 @@ class _ActivationPageState extends State<ActivationPage> {
           ),
           TextField(
             controller: code,
-            keyboardType: TextInputType.number,
+            keyboardType: TextInputType.text,
+            textCapitalization: TextCapitalization.characters,
+            autocorrect: false,
+            enableSuggestions: false,
             textInputAction: TextInputAction.done,
             decoration: const InputDecoration(labelText: 'كود التفعيل'),
             onSubmitted: (_) => activate(),

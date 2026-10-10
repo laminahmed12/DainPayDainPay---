@@ -145,6 +145,8 @@ jobs:
       - name: Verify DainPay screenshot fixes
         run: |
           grep -q "speech_to_text:" pubspec.yaml
+          grep -q "SpeechToText.androidNoBluetooth" lib/main.dart
+          grep -q "SpeechToText.androidIntentLookup" lib/main.dart
           grep -q "android.permission.RECORD_AUDIO" android/app/src/main/AndroidManifest.xml
           grep -q "android.speech.RecognitionService" android/app/src/main/AndroidManifest.xml
           ! grep -q "رمز الاسترداد" lib/main.dart
@@ -160,7 +162,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-1.6.9-build-release
+          name: dainpay-v83-voice-copy-release
           path: |
             build/app/outputs/flutter-apk/app-release.apk
             release-signing-certificate.txt

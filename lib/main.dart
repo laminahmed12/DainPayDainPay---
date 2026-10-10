@@ -6,7 +6,6 @@ import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'backup_service.dart';
@@ -15,13 +14,14 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:http/http.dart' as http;
 
 const Color emerald = Color(0xFF0F5C6E);
 const Color mint = Color(0xFF2EC4B6);
 const Color burgundy = Color(0xFFE63946);
 
 const int trialLengthDays = 7;
-const String adminPin = '116936';
+const String cloudflareActivationUrl = 'https://dainpay-activation.lamin-ahmed12.workers.dev';
 const String appTitle = 'DainPay — دَيْن';
 const String functionsRegion = 'us-central1';
 
@@ -433,6 +433,7 @@ class Store extends ChangeNotifier {
   bool activated = false;
   bool dark = false;
   bool isAdmin = false;
+  String ownerToken = '';
   String lastDeleteError = '';
 
   final DainPayBackupService backupService = DainPayBackupService();
@@ -1065,149 +1066,99 @@ class Store extends ChangeNotifier {
   }
 
   Future<bool> activateCode(String code) async {
-    if (!firebaseReady || uid.isEmpty) return false;
-    final clean = _digits(code).replaceAll(RegExp(r'\D'), '');
-    if (!RegExp(r'^\d{6}$').hasMatch(clean)) return false;
-
+    final cleanCode = _digits(code).trim().replaceAll(RegExp(r'\\s+'), '');
+    if (cleanCode.isEmpty) return false;
     try {
-      await FirebaseAuth.instance.currentUser?.getIdToken(true);
-      final callable = FirebaseFunctions.instanceFor(region: functionsRegion)
-          .httpsCallable(
-            'redeemActivationCode',
-            options: HttpsCallableOptions(
-              timeout: const Duration(seconds: 20),
-            ),
-          );
-      final result = await callable.call({
-        'code': clean,
-        'deviceId': deviceId,
-      });
-      final data = result.data;
-      if (data is Map && data['success'] == true) {
-        activated = true;
-        await saveLocal();
-        safeNotify();
-        return true;
-      }
-      return false;
-    } on FirebaseFunctionsException catch (e) {
-      debugPrint('Activation function error: ${e.code}: ${e.message ?? ''}');
-      if (!{
-        'permission-denied',
-        'not-found',
-        'unavailable',
-        'deadline-exceeded',
-        'unauthenticated',
-      }.contains(e.code)) {
+      final response = await http.post(
+        Uri.parse(cloudflareActivationUrl),
+        headers: const {'content-type': 'application/json'},
+        body: jsonEncode({
+          'action': 'redeem',
+          'code': cleanCode,
+          'deviceId': deviceId,
+        }),
+      ).timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200) {
+        debugPrint('Cloudflare redeem failed: ${response.statusCode} ${response.body}');
         return false;
       }
-      try {
-        final ref = activationCodesRef.doc(clean);
-        final redeemed = await FirebaseFirestore.instance.runTransaction<bool>((tx) async {
-          final snap = await tx.get(ref);
-          if (!snap.exists) return false;
-          final data = snap.data() ?? <String, dynamic>{};
-          if (data['used'] == true) return false;
-          tx.update(ref, {
-            'used': true,
-            'usedAt': FieldValue.serverTimestamp(),
-            'usedUid': uid,
-            'usedDeviceId': deviceId,
-          });
-          return true;
-        });
-        if (!redeemed) return false;
-        await userRef.doc(uid).set({
-          'activated': true,
-          'activatedAt': FieldValue.serverTimestamp(),
-          'activatedDeviceId': deviceId,
-        }, SetOptions(merge: true));
-        activated = true;
-        await saveLocal();
-        safeNotify();
-        return true;
-      } catch (fallbackError) {
-        debugPrint('Activation fallback error: $fallbackError');
-        return false;
+      final data = jsonDecode(response.body);
+      if (data is! Map || data['success'] != true) return false;
+      activated = true;
+      await saveLocal();
+      if (firebaseReady && uid.isNotEmpty) {
+        try {
+          await userRef.doc(uid).set({
+            'activated': true,
+            'activatedAt': FieldValue.serverTimestamp(),
+            'activatedDeviceId': deviceId,
+          }, SetOptions(merge: true));
+        } catch (e) {
+          debugPrint('Activation mirror to Firebase failed: $e');
+        }
       }
+      safeNotify();
+      return true;
     } catch (e) {
-      debugPrint('Activation error: $e');
+      debugPrint('Cloudflare activation error: $e');
+      return false;
+    }
+  }
+
+  Future<bool> loginOwner(String pin) async {
+    try {
+      final response = await http.post(
+        Uri.parse(cloudflareActivationUrl),
+        headers: const {'content-type': 'application/json'},
+        body: jsonEncode({'action': 'owner_login', 'adminPin': _digits(pin).trim()}),
+      ).timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200) {
+        debugPrint('Cloudflare owner login failed: ${response.statusCode} ${response.body}');
+        return false;
+      }
+      final data = jsonDecode(response.body);
+      if (data is! Map || data['success'] != true || data['token'] is! String) {
+        return false;
+      }
+      ownerToken = data['token'] as String;
+      isAdmin = true;
+      safeNotify();
+      return true;
+    } catch (e) {
+      debugPrint('Cloudflare owner login error: $e');
       return false;
     }
   }
 
   Future<String?> generateCode() async {
-    if (!firebaseReady || !isAdmin || uid.isEmpty) {
-      throw StateError('تعذر الاتصال بحساب المالك في Firebase.');
+    if (!isAdmin || ownerToken.isEmpty) {
+      throw StateError('جلسة المالك غير صالحة. سجّل الدخول مجدداً.');
     }
-
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      throw StateError('جلسة Firebase غير جاهزة. أعد المحاولة بعد لحظات.');
-    }
-
     try {
-      await user.getIdToken();
-
-      final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
-          .httpsCallable(
-            'generateActivationCode',
-            options: HttpsCallableOptions(
-              timeout: const Duration(seconds: 30),
-            ),
-          );
-
-      final result = await callable.call({
-        'adminPin': adminPin,
-        'deviceId': deviceId,
-      });
-
-      final data = result.data;
-      if (data is Map && data['success'] == true && data['code'] is String) {
-        return data['code'] as String;
+      final response = await http.post(
+        Uri.parse(cloudflareActivationUrl),
+        headers: const {'content-type': 'application/json'},
+        body: jsonEncode({'action': 'generate', 'ownerToken': ownerToken}),
+      ).timeout(const Duration(seconds: 20));
+      final data = jsonDecode(response.body);
+      if (response.statusCode != 200 ||
+          data is! Map ||
+          data['success'] != true ||
+          data['code'] is! String) {
+        final message = data is Map
+            ? (data['error'] ?? 'تعذر توليد رمز التفعيل')
+            : 'استجابة غير صالحة من خدمة التفعيل';
+        throw StateError('$message');
       }
-
-      throw StateError('خدمة التفعيل أعادت استجابة غير صالحة.');
-    } on FirebaseFunctionsException catch (e) {
-      debugPrint(
-        'Generate activation function error: ${e.code}: ${e.message ?? ''}',
-      );
-
-      switch (e.code) {
-        case 'permission-denied':
-          throw StateError(
-            'خدمة توليد رمز التفعيل رفضت الطلب. تأكد أن دالة generateActivationCode منشورة في Firebase وأن جلسة المالك صالحة.',
-          );
-        case 'unauthenticated':
-          throw StateError('جلسة Firebase منتهية. أعد المحاولة.');
-        case 'not-found':
-          throw StateError(
-            'خدمة التفعيل غير منشورة في Firebase أو المنطقة غير صحيحة.',
-          );
-        case 'unavailable':
-        case 'deadline-exceeded':
-          throw StateError(
-            'خدمة التفعيل غير متاحة حالياً. تحقق من اتصال الإنترنت ثم أعد المحاولة.',
-          );
-        case 'invalid-argument':
-          throw StateError('بيانات طلب التفعيل غير صحيحة.');
-        default:
-          throw StateError(
-            'تعذر توليد رمز التفعيل حالياً. رمز الخطأ: ${e.code}.',
-          );
-      }
+      return data['code'] as String;
+    } on StateError {
+      rethrow;
     } catch (e) {
-      debugPrint('Generate activation error: $e');
-      if (e is StateError) rethrow;
-      throw StateError('تعذر توليد رمز التفعيل حالياً.');
+      debugPrint('Cloudflare code generation error: $e');
+      throw StateError('تعذر الاتصال بخدمة التفعيل عبر Cloudflare.');
     }
   }
-  bool checkAdminLocal(String pin) {
-    final valid = _digits(pin).trim() == adminPin;
-    isAdmin = valid;
-    safeNotify();
-    return valid;
-  }
+
 }
 
 // -----------------------------------------------------------------------------
@@ -2862,15 +2813,6 @@ class _ActivationPageState extends State<ActivationPage> {
   Future<void> activate() async {
     if (busy) return;
 
-    if (!widget.store.firebaseReady) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'لا يوجد اتصال بالخدمة حالياً. حاول بعد الاتصال بالإنترنت.')),
-      );
-      return;
-    }
-
     final entered = code.text.trim();
     if (entered.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2964,20 +2906,20 @@ class _AdminGateState extends State<AdminGate> {
     super.dispose();
   }
 
-  void enter() {
+  Future<void> enter() async {
     if (busy) return;
-
-    final navigator = Navigator.of(context);
-    final valid = widget.store.checkAdminLocal(pin.text);
-
+    setState(() => busy = true);
+    final valid = await widget.store.loginOwner(pin.text);
+    if (!mounted) return;
+    setState(() => busy = false);
     if (valid) {
-      navigator.pop();
-      navigator.push(
+      Navigator.of(context).pop();
+      Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => AdminPage(store: widget.store)),
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('رمز المالك غير صحيح')),
+        const SnackBar(content: Text('تعذر دخول المالك. تحقق من الرمز والاتصال بخدمة Cloudflare.')),
       );
     }
   }
@@ -3028,13 +2970,6 @@ class _AdminPageState extends State<AdminPage> {
   Future<void> generate() async {
     if (busy) return;
 
-    if (!widget.store.firebaseReady) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Firebase غير متصل')),
-      );
-      return;
-    }
-
     setState(() => busy = true);
     String? generated;
     try {
@@ -3067,9 +3002,7 @@ class _AdminPageState extends State<AdminPage> {
             child: ListTile(
               leading: const Icon(Icons.admin_panel_settings_outlined),
               title: const Text('وضع المالك'),
-              subtitle: Text(store.firebaseReady
-                  ? 'متصل بـ Firebase'
-                  : 'غير متصل بـ Firebase'),
+              subtitle: const Text('دخول المالك وتوليد الرموز عبر Cloudflare'),
             ),
           ),
           const Card(
@@ -3093,7 +3026,7 @@ class _AdminPageState extends State<AdminPage> {
                   style: const TextStyle(
                       fontSize: 25, fontWeight: FontWeight.w900),
                 ),
-                trailing: result.length == 6
+                trailing: result.length >= 20
                     ? IconButton(
                         onPressed: () {
                           launchWhatsApp(

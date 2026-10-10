@@ -2790,7 +2790,10 @@ class _ActivationPageState extends State<ActivationPage> {
           ),
           TextField(
             controller: code,
-            keyboardType: TextInputType.number,
+            keyboardType: TextInputType.text,
+            textCapitalization: TextCapitalization.characters,
+            autocorrect: false,
+            enableSuggestions: false,
             textInputAction: TextInputAction.done,
             decoration: const InputDecoration(labelText: 'كود التفعيل'),
             onSubmitted: (_) => activate(),

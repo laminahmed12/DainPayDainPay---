@@ -56,6 +56,9 @@ jobs:
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           text = manifest.read_text()
           text = text.replace('android:icon="@mipmap/ic_launcher"', 'android:icon="@drawable/dainpay_icon"')
+          if 'android:label="dainpay"' not in text:
+              raise SystemExit('Generated Android app label was not the expected value')
+          text = text.replace('android:label="dainpay"', 'android:label="دفتر الديون"', 1)
           manifest.write_text(text)
           PY
 

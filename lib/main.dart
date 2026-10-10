@@ -3052,19 +3052,7 @@ class _AdminPageState extends State<AdminPage> {
                   style: const TextStyle(
                       fontSize: 25, fontWeight: FontWeight.w900),
                 ),
-                trailing: RegExp(r'^[A-Z0-9]{24}
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-extension FirstOrNullExtension<T> on Iterable<T> {
-  T? get firstOrNull => isEmpty ? null : first;
-}
-).hasMatch(result)
+                trailing: RegExp(r'^[A-Z0-9]{24}$').hasMatch(result)
                     ? Wrap(
                         spacing: 0,
                         children: [

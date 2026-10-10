@@ -2,7 +2,17 @@
 
 Date: 2026-10-10
 
-## Reference name
+## Current working reference (latest)
+**DainPay V84 — Voice recording verified on the user's Samsung phone; Google Drive backup issue remains open**
+
+- Working branch: `v84-voice-timeout-diagnostics`
+- Latest code commit: `0858b6ece539f4065ebcf78eba41aad3fd394f21`
+- Android Release workflow run: `38026394107` — completed successfully (analysis + release APK build + artifact upload).
+- APK artifact: `dainpay-v84-voice-timeout-diagnostics-release` (artifact ID `11660241624`; expires 2027-01-08).
+- On-device verification: user confirmed voice recording now works and screenshot shows a saved voice draft with recognized Arabic text and amount. Preserve this working voice flow; do not refactor it while fixing backup.
+- Current open issue: Settings shows local encrypted backup succeeded, but Google Drive access failed at 2026-10-10 07:25. Need inspect Google Sign-In / Drive authorization and configuration, and surface the underlying error rather than changing customer data storage.
+
+## Earlier reference
 **DainPay Cloudflare Owner Login + Code Generation — Working Reference**
 
 ## Verified from the user's device

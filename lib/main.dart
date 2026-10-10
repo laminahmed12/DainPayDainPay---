@@ -69,7 +69,7 @@ class _DainPayBootstrapState extends State<DainPayBootstrap> {
     if (store != null) return DainPayApp(store: store);
 
     return MaterialApp(
-      debugShowCheckedModeBanner: true,
+      debugShowCheckedModeBanner: false,
       home: Scaffold(
         backgroundColor: const Color(0xFF101719),
         body: Center(

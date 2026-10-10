@@ -2321,7 +2321,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
 
       await speech.listen(
         listenOptions: stt.SpeechListenOptions(
-          localeId: arabicLocale ?? 'ar-LY',
+          localeId: arabicLocale,
           partialResults: true,
           cancelOnError: true,
         ),
@@ -2370,7 +2370,9 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         },
       ).timeout(const Duration(seconds: 8));
 
-      if (mounted) setState(() => stage = 'تم إرسال أمر بدء الاستماع؛ بانتظار الكلام...');
+      if (mounted && !listening) {
+        setState(() => stage = 'تم إرسال أمر بدء الاستماع؛ بانتظار الكلام...');
+      }
     } on TimeoutException catch (e, stack) {
       debugPrint('Speech timeout: $e');
       debugPrintStack(stackTrace: stack);

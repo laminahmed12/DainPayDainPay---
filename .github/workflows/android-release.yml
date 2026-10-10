@@ -54,16 +54,22 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          settings = Path('android/settings.gradle')
+          settings = next(p for p in [Path('android/settings.gradle'), Path('android/settings.gradle.kts')] if p.exists())
           text = settings.read_text()
           if 'com.google.gms.google-services' not in text:
-              text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services" version "4.4.2" apply false', 1)
+              if settings.suffix == '.kts':
+                  text = text.replace('plugins {', 'plugins {\n    id("com.google.gms.google-services") version "4.4.2" apply false', 1)
+              else:
+                  text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services" version "4.4.2" apply false', 1)
           settings.write_text(text)
-          app = Path('android/app/build.gradle')
+          app = next(p for p in [Path('android/app/build.gradle'), Path('android/app/build.gradle.kts')] if p.exists())
           text = app.read_text()
-          if 'id "com.google.gms.google-services"' not in text:
-              text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services"', 1)
-          text = text.replace('flutter.minSdkVersion', '23')
+          if 'com.google.gms.google-services' not in text:
+              if app.suffix == '.kts':
+                  text = text.replace('plugins {', 'plugins {\n    id("com.google.gms.google-services")', 1)
+              else:
+                  text = text.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services"', 1)
+          text = text.replace('flutter.minSdkVersion', '23').replace('flutter.minSdkVersion', '23')
           app.write_text(text)
           PY
       - name: Install dependencies

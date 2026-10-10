@@ -25,16 +25,114 @@ const String cloudflareActivationUrl = 'https://dainpay-activation.lamin-ahmed12
 const String appTitle = 'دفتر الديون';
 const String functionsRegion = 'us-central1';
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // Paint the welcome screen immediately; local storage and network setup
+  // continue asynchronously so Android's startup screen never delays the UI.
+  runApp(const DainPayBootstrap());
+}
 
-  // Load only local state before the first frame. Network services must never
-  // block the welcome screen or delay access to the local customer ledger.
-  final store = await Store.load();
-  runApp(DainPayApp(store: store));
+class DainPayBootstrap extends StatefulWidget {
+  const DainPayBootstrap({super.key});
 
-  // Firebase authentication and connection run after the UI is visible.
-  unawaited(_initializeBackgroundServices(store));
+  @override
+  State<DainPayBootstrap> createState() => _DainPayBootstrapState();
+}
+
+class _DainPayBootstrapState extends State<DainPayBootstrap> {
+  Store? _store;
+  Object? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStore();
+  }
+
+  Future<void> _loadStore() async {
+    try {
+      final store = await Store.load();
+      if (!mounted) return;
+      setState(() => _store = store);
+      // Firebase authentication and connection must not block app startup.
+      unawaited(_initializeBackgroundServices(store));
+    } catch (error, stack) {
+      debugPrint('DainPay local startup error: $error');
+      debugPrintStack(stackTrace: stack);
+      if (mounted) setState(() => _loadError = error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = _store;
+    if (store != null) return DainPayApp(store: store);
+
+    return MaterialApp(
+      debugShowCheckedModeBanner: true,
+      home: Scaffold(
+        backgroundColor: const Color(0xFF101719),
+        body: Center(
+          child: _loadError == null
+              ? const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.menu_book_rounded,
+                          size: 66, color: Color(0xFF2EC4B6)),
+                      SizedBox(height: 16),
+                      Text('دفتر الديون',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 29,
+                            fontWeight: FontWeight.w900,
+                          )),
+                      SizedBox(height: 8),
+                      Text('ديونك محفوظة.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Color(0xFF2EC4B6),
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                          )),
+                      SizedBox(height: 24),
+                      Text('Adreemk',
+                          style: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 16,
+                            letterSpacing: 3,
+                            fontWeight: FontWeight.w800,
+                          )),
+                    ],
+                  ),
+                )
+              : Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'تعذر تحميل البيانات المحلية. لم يتم حذف البيانات.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white, fontSize: 18),
+                      ),
+                      const SizedBox(height: 16),
+                      FilledButton(
+                        onPressed: () {
+                          setState(() => _loadError = null);
+                          _loadStore();
+                        },
+                        child: const Text('إعادة المحاولة'),
+                      ),
+                    ],
+                  ),
+                ),
+        ),
+      ),
+    );
+  }
 }
 
 Future<void> _initializeBackgroundServices(Store store) async {
@@ -1266,7 +1364,7 @@ class DainPayApp extends StatelessWidget {
           themeMode: store.dark ? ThemeMode.dark : ThemeMode.light,
           home: Directionality(
             textDirection: TextDirection.rtl,
-            child: WelcomePage(store: store),
+            child: HomePage(store: store),
           ),
         );
       },

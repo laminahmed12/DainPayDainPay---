@@ -28,8 +28,16 @@ const String functionsRegion = 'us-central1';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Load only local state before the first frame. Network services must never
+  // block the welcome screen or delay access to the local customer ledger.
   final store = await Store.load();
+  runApp(DainPayApp(store: store));
 
+  // Firebase authentication and connection run after the UI is visible.
+  unawaited(_initializeBackgroundServices(store));
+}
+
+Future<void> _initializeBackgroundServices(Store store) async {
   try {
     if (Firebase.apps.isEmpty) {
       await Firebase.initializeApp();
@@ -39,15 +47,16 @@ Future<void> main() async {
     store.firebaseInitialized = false;
     debugPrint('Firebase initialization error: $e');
     debugPrintStack(stackTrace: stack);
+    store.safeNotify();
+    return;
   }
 
-  await store.connectFirebase();
   try {
-    await store.saveLocal();
-  } catch (e) {
-    debugPrint('Initial local backup error: $e');
+    await store.connectFirebase();
+  } catch (e, stack) {
+    debugPrint('Firebase connection error: $e');
+    debugPrintStack(stackTrace: stack);
   }
-  runApp(DainPayApp(store: store));
 }
 
 // -----------------------------------------------------------------------------
@@ -1284,7 +1293,7 @@ class _WelcomePageState extends State<WelcomePage> {
   @override
   void initState() {
     super.initState();
-    _welcomeTimer = Timer(const Duration(milliseconds: 1600), () {
+    _welcomeTimer = Timer(const Duration(milliseconds: 350), () {
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute<void>(

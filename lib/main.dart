@@ -3534,10 +3534,11 @@ class _AdminPageState extends State<AdminPage> {
           final used = record['used'] == true, revoked = record['revoked'] == true;
           final created = DateTime.fromMillisecondsSinceEpoch((record['createdAt'] is num ? (record['createdAt'] as num).toInt() : 0));
           final status = revoked ? 'ملغى' : used ? 'مستخدم' : 'متاح';
+          final dateText = '${created.year}-${created.month.toString().padLeft(2, "0")}-${created.day.toString().padLeft(2, "0")}';
           return Card(child: ListTile(
             leading: Icon(revoked ? Icons.block : used ? Icons.verified : Icons.vpn_key, color: revoked ? burgundy : used ? mint : emerald),
             title: Text(name.isEmpty ? 'عميل غير محدد' : name),
-            subtitle: Text('$status • ${created.year}-${created.month.toString().padLeft(2,'0')}-${created.day.toString().padLeft(2,'0')}'),
+            subtitle: Text('$status • $dateText'),
             trailing: revoked || used ? null : IconButton(tooltip: 'إيقاف الرمز', onPressed: () => revoke(record), icon: const Icon(Icons.block, color: burgundy)),
           ));
         }),

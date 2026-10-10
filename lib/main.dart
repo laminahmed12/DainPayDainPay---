@@ -2309,27 +2309,14 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       }
 
       if (!mounted) return;
-      setState(() => stage = 'جارٍ البحث عن اللغة العربية...');
 
-      final locales = await speech.locales().timeout(
-        const Duration(seconds: 6),
-      );
-      String? arabicLocale;
-      for (final locale in locales) {
-        if (locale.localeId.toLowerCase() == 'ar-ly') {
-          arabicLocale = locale.localeId;
-          break;
-        }
-      }
-      arabicLocale ??= locales
-          .where((locale) => locale.localeId.toLowerCase().startsWith('ar-'))
-          .map((locale) => locale.localeId)
-          .firstOrNull;
-
-      if (!mounted) return;
+      // Avoid speech.locales(): on some Android speech services this native
+      // query hangs even though Google voice typing works in the keyboard.
+      // Use a widely supported Arabic locale directly to keep startup reliable.
+      const arabicLocale = 'ar-SA';
       setState(() {
         listening = false;
-        stage = 'جارٍ تشغيل الميكروفون...';
+        stage = 'جارٍ تشغيل التعرف الصوتي بالعربية...';
       });
 
       await speech.listen(

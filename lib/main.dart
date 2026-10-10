@@ -7,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'backup_service.dart';
 import 'package:flutter/material.dart';
@@ -609,8 +610,12 @@ class Store extends ChangeNotifier {
     store.pendingDeletedCustomerIds.addAll(pendingDeleted);
 
     if (store.deviceId.isEmpty) {
-      store.deviceId =
-          'DP-${DateTime.now().millisecondsSinceEpoch}-${Random.secure().nextInt(1000000)}';
+      try {
+        final androidInfo = await DeviceInfoPlugin().androidInfo;
+        store.deviceId = 'ANDROID-${androidInfo.id}';
+      } catch (_) {
+        store.deviceId = 'DP-${DateTime.now().millisecondsSinceEpoch}-${Random.secure().nextInt(1000000)}';
+      }
       await store
           ._pref(() => store.prefs.setString('device_id', store.deviceId));
     }
@@ -728,6 +733,7 @@ class Store extends ChangeNotifier {
 
       // Load the cloud account state first. This prevents a reinstall/new local
       // trial_start from overwriting the original trial start date.
+      await syncTrialStatus();
       await loadAccountState();
 
       if (trialStart == null) {
@@ -1331,34 +1337,68 @@ class Store extends ChangeNotifier {
     }
   }
 
-  Future<String?> generateCode() async {
-    if (!isAdmin || ownerToken.isEmpty) {
-      throw StateError('جلسة المالك غير صالحة. سجّل الدخول مجدداً.');
-    }
+  Future<String?> generateCode({String customerName = ''}) async {
+    if (!isAdmin || ownerToken.isEmpty) throw StateError('جلسة المالك غير صالحة. سجّل الدخول مجدداً.');
     try {
-      final response = await http.post(
-        Uri.parse(cloudflareActivationUrl),
+      final response = await http.post(Uri.parse(cloudflareActivationUrl),
         headers: const {'content-type': 'application/json'},
-        body: jsonEncode({'action': 'generate', 'ownerToken': ownerToken}),
-      ).timeout(const Duration(seconds: 20));
+        body: jsonEncode({'action': 'generate', 'ownerToken': ownerToken, 'customerName': customerName.trim()}))
+        .timeout(const Duration(seconds: 20));
       final data = jsonDecode(response.body);
-      if (response.statusCode != 200 ||
-          data is! Map ||
-          data['success'] != true ||
-          data['code'] is! String) {
-        final message = data is Map
-            ? (data['error'] ?? 'تعذر توليد رمز التفعيل')
-            : 'استجابة غير صالحة من خدمة التفعيل';
+      if (response.statusCode != 200 || data is! Map || data['success'] != true || data['code'] is! String) {
+        final message = data is Map ? (data['error'] ?? 'تعذر توليد رمز التفعيل') : 'استجابة غير صالحة من خدمة التفعيل';
         throw StateError('$message');
       }
       return data['code'] as String;
-    } on StateError {
-      rethrow;
-    } catch (e) {
-      debugPrint('Cloudflare code generation error: $e');
-      throw StateError('تعذر الاتصال بخدمة التفعيل عبر Cloudflare.');
+    } on StateError { rethrow; }
+    catch (e) { debugPrint('Cloudflare code generation error: $e'); throw StateError('تعذر الاتصال بخدمة التفعيل عبر Cloudflare.'); }
+  }
+
+  Future<void> syncTrialStatus() async {
+    if (deviceId.isEmpty) return;
+    try {
+      final response = await http.post(Uri.parse(cloudflareActivationUrl),
+        headers: const {'content-type': 'application/json'},
+        body: jsonEncode({'action': 'trial_status', 'deviceId': deviceId}))
+        .timeout(const Duration(seconds: 12));
+      if (response.statusCode != 200) return;
+      final data = jsonDecode(response.body);
+      if (data is! Map || data['success'] != true) return;
+      final raw = data['trialStart'];
+      final serverStart = raw is num ? DateTime.fromMillisecondsSinceEpoch(raw.toInt()) : DateTime.tryParse('$raw');
+      if (serverStart != null && (trialStart == null || serverStart.isBefore(trialStart!))) {
+        trialStart = serverStart;
+        await _pref(() => prefs.setString('trial_start', serverStart.toIso8601String()));
+      }
+    } catch (e) { debugPrint('Trial status sync failed: $e'); }
+  }
+
+  Future<Map<String, dynamic>> listActivationCodes() async {
+    if (!isAdmin || ownerToken.isEmpty) throw StateError('سجّل دخول المالك مجددًا.');
+    final response = await http.post(Uri.parse(cloudflareActivationUrl),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({'action': 'list', 'ownerToken': ownerToken}))
+      .timeout(const Duration(seconds: 20));
+    final data = jsonDecode(response.body);
+    if (response.statusCode != 200 || data is! Map || data['success'] != true) {
+      throw StateError('تعذر تحميل قائمة الرموز. قد تكون جلسة المالك انتهت.');
+    }
+    return Map<String, dynamic>.from(data);
+  }
+
+  Future<void> revokeActivationCode(String id) async {
+    if (!isAdmin || ownerToken.isEmpty) throw StateError('سجّل دخول المالك مجددًا.');
+    final response = await http.post(Uri.parse(cloudflareActivationUrl),
+      headers: const {'content-type': 'application/json'},
+      body: jsonEncode({'action': 'revoke', 'ownerToken': ownerToken, 'id': id}))
+      .timeout(const Duration(seconds: 20));
+    final data = jsonDecode(response.body);
+    if (response.statusCode != 200 || data is! Map || data['success'] != true) {
+      final error = data is Map ? '${data['error'] ?? ''}' : '';
+      throw StateError(error == 'already_used' ? 'لا يمكن إيقاف رمز سبق استخدامه.' : 'تعذر إيقاف الرمز.');
     }
   }
+
 
 }
 
@@ -3420,108 +3460,91 @@ class AdminPage extends StatefulWidget {
 
 class _AdminPageState extends State<AdminPage> {
   String result = '';
-  bool busy = false;
-
+  bool busy = false, loadingCodes = false;
+  final customerName = TextEditingController();
+  List<Map<String, dynamic>> records = [];
   @override
-  void dispose() {
-    super.dispose();
+  void initState() { super.initState(); loadCodes(); }
+  @override
+  void dispose() { customerName.dispose(); super.dispose(); }
+  Future<void> loadCodes() async {
+    if (loadingCodes) return;
+    setState(() => loadingCodes = true);
+    try {
+      final data = await widget.store.listActivationCodes();
+      final raw = data['records'];
+      if (mounted) setState(() => records = raw is List ? raw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList() : []);
+    } catch (e) {
+      if (mounted && records.isEmpty) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    } finally { if (mounted) setState(() => loadingCodes = false); }
   }
-
   Future<void> generate() async {
     if (busy) return;
-
     setState(() => busy = true);
     String? generated;
     try {
-      generated = await widget.store.generateCode();
-    } on FirebaseException catch (e) {
-      generated = 'Firebase ${e.code}: ${e.message ?? ''}'.trim();
-    } catch (e) {
-      generated = e is StateError
-          ? e.message
-          : 'تعذر توليد رمز التفعيل حالياً.';
-    }
-
+      generated = await widget.store.generateCode(customerName: customerName.text);
+      customerName.clear();
+      await loadCodes();
+    } catch (e) { generated = e is StateError ? e.message : 'تعذر توليد رمز التفعيل حالياً.'; }
     if (!mounted) return;
-    setState(() {
-      busy = false;
-      result = generated ?? 'تعذر توليد الرمز';
-    });
+    setState(() { busy = false; result = generated ?? 'تعذر توليد الرمز'; });
   }
-
+  Future<void> revoke(Map<String, dynamic> record) async {
+    final id = '\${record['id'] ?? ''}';
+    if (id.isEmpty) return;
+    final ok = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
+      title: const Text('إيقاف رمز التفعيل'),
+      content: const Text('سيُمنع استخدام هذا الرمز إذا لم يكن قد استُخدم.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('إلغاء')),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('إيقاف الرمز')),
+      ],
+    ));
+    if (ok != true || !mounted) return;
+    try {
+      await widget.store.revokeActivationCode(id);
+      await loadCodes();
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إيقاف الرمز')));
+    } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e'))); }
+  }
   @override
   Widget build(BuildContext context) {
-    final store = widget.store;
-
     return Scaffold(
-      appBar: AppBar(title: const Text('إدارة التفعيل')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.admin_panel_settings_outlined),
-              title: const Text('وضع المالك'),
-              subtitle: const Text('دخول المالك وتوليد الرموز عبر Cloudflare'),
-            ),
-          ),
-          const Card(
-            child: ListTile(
-              leading: Icon(Icons.vpn_key_rounded),
-              title: Text('رمز دائم لمرة واحدة'),
-              subtitle:
-                  Text('الرمز غير مرتبط بالهاتف ويمكن استخدامه مرة واحدة فقط.'),
-            ),
-          ),
-          FilledButton(
-            onPressed: busy ? null : generate,
-            child: Text(busy ? 'جارٍ التوليد...' : 'توليد رمز تفعيل'),
-          ),
-          if (result.isNotEmpty)
-            Card(
-              child: ListTile(
-                title: const Text('رمز التفعيل'),
-                subtitle: SelectableText(
-                  result,
-                  style: const TextStyle(
-                      fontSize: 25, fontWeight: FontWeight.w900),
-                ),
-                trailing: RegExp(r'^[A-Z0-9]{24}$').hasMatch(result)
-                    ? Wrap(
-                        spacing: 0,
-                        children: [
-                          IconButton(
-                            tooltip: 'نسخ رمز التفعيل',
-                            onPressed: () async {
-                              await Clipboard.setData(ClipboardData(text: result));
-                              if (!mounted) return;
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('تم نسخ رمز التفعيل')),
-                              );
-                            },
-                            icon: const Icon(Icons.copy_rounded),
-                          ),
-                          IconButton(
-                            tooltip: 'إرسال الرمز عبر واتساب',
-                            onPressed: () {
-                              launchWhatsApp(
-                                '+218934951072',
-                                'رمز تفعيل DainPay: $result',
-                              );
-                            },
-                            icon: const Icon(Icons.send),
-                          ),
-                        ],
-                      )
-                    : null,
-              ),
-            ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('إدارة التفعيل'), actions: [
+        IconButton(tooltip: 'تحديث القائمة', onPressed: loadingCodes ? null : loadCodes, icon: const Icon(Icons.refresh)),
+      ]),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        const Card(child: ListTile(leading: Icon(Icons.admin_panel_settings_outlined), title: Text('وضع المالك'), subtitle: Text('توليد الرموز وإدارتها عبر Cloudflare'))),
+        const Card(child: ListTile(leading: Icon(Icons.vpn_key_rounded), title: Text('رمز دائم لمرة واحدة'), subtitle: Text('اسم العميل اختياري. يمكن استخدام الرمز مرة واحدة فقط.'))),
+        TextField(controller: customerName, textCapitalization: TextCapitalization.words, decoration: const InputDecoration(labelText: 'اسم العميل (اختياري)', hintText: 'اتركه فارغًا إن رغبت', prefixIcon: Icon(Icons.person_outline))),
+        const SizedBox(height: 10),
+        FilledButton(onPressed: busy ? null : generate, child: Text(busy ? 'جارٍ التوليد...' : 'توليد رمز تفعيل')),
+        if (result.isNotEmpty && RegExp(r'^[A-Z0-9]{24}$').hasMatch(result))
+          Card(child: ListTile(title: const Text('رمز التفعيل الجديد'), subtitle: SelectableText(result, style: const TextStyle(fontSize: 23, fontWeight: FontWeight.w900)), trailing: Wrap(children: [
+            IconButton(tooltip: 'نسخ رمز التفعيل', onPressed: () async { await Clipboard.setData(ClipboardData(text: result)); if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم نسخ رمز التفعيل'))); }, icon: const Icon(Icons.copy_rounded)),
+            IconButton(tooltip: 'إرسال الرمز عبر واتساب', onPressed: () { launchWhatsApp('+218934951072', 'رمز تفعيل DainPay: $result'); }, icon: const Icon(Icons.send)),
+          ])))
+        else if (result.isNotEmpty) Padding(padding: const EdgeInsets.all(8), child: Text(result, style: const TextStyle(color: burgundy))),
+        const SizedBox(height: 12),
+        Row(children: [const Expanded(child: Text('سجل رموز التفعيل', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))), if (loadingCodes) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))]),
+        if (!loadingCodes && records.isEmpty) const Padding(padding: EdgeInsets.all(12), child: Text('لا توجد رموز محفوظة حتى الآن.')),
+        ...records.map((record) {
+          final name = '\${record['customerName'] ?? ''}'.trim();
+          final used = record['used'] == true, revoked = record['revoked'] == true;
+          final created = DateTime.fromMillisecondsSinceEpoch((record['createdAt'] is num ? (record['createdAt'] as num).toInt() : 0));
+          final status = revoked ? 'ملغى' : used ? 'مستخدم' : 'متاح';
+          return Card(child: ListTile(
+            leading: Icon(revoked ? Icons.block : used ? Icons.verified : Icons.vpn_key, color: revoked ? burgundy : used ? mint : emerald),
+            title: Text(name.isEmpty ? 'عميل غير محدد' : name),
+            subtitle: Text('$status • \${created.year}-\${created.month.toString().padLeft(2,'0')}-\${created.day.toString().padLeft(2,'0')}'),
+            trailing: revoked || used ? null : IconButton(tooltip: 'إيقاف الرمز', onPressed: () => revoke(record), icon: const Icon(Icons.block, color: burgundy)),
+          ));
+        }),
+      ]),
     );
   }
 }
-
 extension FirstOrNullExtension<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }

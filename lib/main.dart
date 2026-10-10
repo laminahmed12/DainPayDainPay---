@@ -772,22 +772,24 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> saveLocal() async {
-    // Keep the interactive save path fast: only persist the primary local data
-    // here. The encrypted redundant snapshot is queued in the background.
-    await _pref(() => prefs.setString(
-        'customers', jsonEncode(customers.map((e) => e.toJson()).toList())));
-    await _pref(() => prefs.setString('transactions',
-        jsonEncode(transactions.map((e) => e.toJson()).toList())));
-    await _pref(() => prefs.setString('voice_drafts',
-        jsonEncode(voiceDrafts.map((e) => e.toJson()).toList())));
-    await _pref(() => prefs.setString('shop', shop));
-    await _pref(() => prefs.setString('whatsappMessage', whatsappMessage));
-    await _pref(() => prefs.setBool('dark', dark));
-    await _pref(() => prefs.setBool('activated', activated));
-    await _pref(() => prefs.setStringList(
-          'pending_deleted_customers',
-          pendingDeletedCustomerIds.toList(),
-        ));
+    // Persist independent keys concurrently to reduce interaction latency.
+    // The encrypted A/B snapshot remains queued separately after these writes.
+    await Future.wait([
+      _pref(() => prefs.setString(
+          'customers', jsonEncode(customers.map((e) => e.toJson()).toList()))),
+      _pref(() => prefs.setString('transactions',
+          jsonEncode(transactions.map((e) => e.toJson()).toList()))),
+      _pref(() => prefs.setString('voice_drafts',
+          jsonEncode(voiceDrafts.map((e) => e.toJson()).toList()))),
+      _pref(() => prefs.setString('shop', shop)),
+      _pref(() => prefs.setString('whatsappMessage', whatsappMessage)),
+      _pref(() => prefs.setBool('dark', dark)),
+      _pref(() => prefs.setBool('activated', activated)),
+      _pref(() => prefs.setStringList(
+            'pending_deleted_customers',
+            pendingDeletedCustomerIds.toList(),
+          )),
+    ]);
 
     _queueEncryptedLocalBackup();
   }

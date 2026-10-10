@@ -1338,6 +1338,17 @@ class _WelcomePageState extends State<WelcomePage> {
                   fontWeight: FontWeight.w600,
                 ),
               ),
+              SizedBox(height: 28),
+              Text(
+                'Adreemk',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 16,
+                  letterSpacing: 3,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
             ],
           ),
         ),

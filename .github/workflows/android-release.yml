@@ -3,7 +3,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage ]
+    branches: [ fix/v82-cloudflare-activation-owner, main, master, rebuild-from-3a83-firebase-fixed, 90-percent-stable, repair-v74-controlled-4, icon-dainpay-v75, repair-v76-activation-delete, repair-v77-customer-delete, repair-v77b-customer-delete, repair-v78-delete-cloud-fix, repair-v79-google-only-storage ]
   pull_request:
     branches: [ main, master, rebuild-from-3a83-firebase-fixed, repair-v74-controlled-4 ]
   workflow_dispatch:
@@ -107,7 +107,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dainpay-v81-data-protection-release
+          name: dainpay-v82-cloudflare-activation-release
           path: |
             build/app/outputs/flutter-apk/app-release.apk
             release-signing-certificate.txt

@@ -3491,7 +3491,7 @@ class _AdminPageState extends State<AdminPage> {
     setState(() { busy = false; result = generated ?? 'تعذر توليد الرمز'; });
   }
   Future<void> revoke(Map<String, dynamic> record) async {
-    final id = '\${record['id'] ?? ''}';
+    final id = '${record['id'] ?? ''}';
     if (id.isEmpty) return;
     final ok = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
       title: const Text('إيقاف رمز التفعيل'),
@@ -3530,14 +3530,14 @@ class _AdminPageState extends State<AdminPage> {
         Row(children: [const Expanded(child: Text('سجل رموز التفعيل', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))), if (loadingCodes) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))]),
         if (!loadingCodes && records.isEmpty) const Padding(padding: EdgeInsets.all(12), child: Text('لا توجد رموز محفوظة حتى الآن.')),
         ...records.map((record) {
-          final name = '\${record['customerName'] ?? ''}'.trim();
+          final name = '${record['customerName'] ?? ''}'.trim();
           final used = record['used'] == true, revoked = record['revoked'] == true;
           final created = DateTime.fromMillisecondsSinceEpoch((record['createdAt'] is num ? (record['createdAt'] as num).toInt() : 0));
           final status = revoked ? 'ملغى' : used ? 'مستخدم' : 'متاح';
           return Card(child: ListTile(
             leading: Icon(revoked ? Icons.block : used ? Icons.verified : Icons.vpn_key, color: revoked ? burgundy : used ? mint : emerald),
             title: Text(name.isEmpty ? 'عميل غير محدد' : name),
-            subtitle: Text('$status • \${created.year}-\${created.month.toString().padLeft(2,'0')}-\${created.day.toString().padLeft(2,'0')}'),
+            subtitle: Text('$status • ${created.year}-${created.month.toString().padLeft(2,'0')}-${created.day.toString().padLeft(2,'0')}'),
             trailing: revoked || used ? null : IconButton(tooltip: 'إيقاف الرمز', onPressed: () => revoke(record), icon: const Icon(Icons.block, color: burgundy)),
           ));
         }),

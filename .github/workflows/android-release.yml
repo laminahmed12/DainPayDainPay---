@@ -120,6 +120,37 @@ jobs:
           manifest.write_text(text)
           PY
 
+      - name: Remove Android launch splash icon
+        run: |
+          set -euo pipefail
+          mkdir -p android/app/src/main/res/drawable
+          cat > android/app/src/main/res/drawable/splash_transparent.xml <<'XML'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <size android:width="1dp" android:height="1dp" />
+              <solid android:color="#00000000" />
+          </shape>
+          XML
+          python3 - <<'PY'
+          from pathlib import Path
+          styles = Path('android/app/src/main/res/values-v31/styles.xml')
+          if styles.exists():
+              text = styles.read_text()
+              item = '<item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_transparent</item>'
+              import re
+              pattern = r'<item name="android:windowSplashScreenAnimatedIcon">.*?</item>'
+              if re.search(pattern, text):
+                  text = re.sub(pattern, item, text, count=1)
+              else:
+                  marker = '<style name="LaunchTheme"'
+                  start = text.find(marker)
+                  if start >= 0:
+                      end = text.find('</style>', start)
+                      if end >= 0:
+                          text = text[:end] + '        ' + item + '\\n    ' + text[end:]
+              styles.write_text(text)
+          print('Android 12+ splash icon disabled when the generated style supports it.')
+          PY
+
       - name: Configure Android SDK and Firebase Gradle plugin
         run: |
           python3 - <<'PY'

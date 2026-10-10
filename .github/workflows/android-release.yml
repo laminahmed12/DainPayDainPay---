@@ -62,22 +62,47 @@ jobs:
           ''')
 
           # Android 12+ renders the app icon on the native splash unless the
-          # animated icon is explicitly overridden. Keep only a matching,
-          # unobtrusive background while Flutter starts.
-          for styles in res.glob('values-v31/styles.xml'):
+          # animated icon is explicitly overridden. Keep only the welcome-screen
+          # background while Flutter initializes.
+          import re
+          styles = res / 'values-v31' / 'styles.xml'
+          styles.parent.mkdir(parents=True, exist_ok=True)
+          if not styles.exists():
+              styles.write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+                  <item name="android:windowSplashScreenBackground">#101719</item>
+                  <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_transparent</item>
+                  <item name="android:windowSplashScreenIconBackgroundColor">#101719</item>
+              </style>
+          </resources>
+          ''')
+          else:
               text = styles.read_text()
-              import re
-              text = re.sub(
+              text, icon_count = re.subn(
                   r'(<item name="android:windowSplashScreenAnimatedIcon">).*?(</item>)',
-                  r'\1@drawable/splash_transparent\2',
+                  r'\\1@drawable/splash_transparent\\2',
                   text,
               )
-              text = re.sub(
+              text, bg_count = re.subn(
                   r'(<item name="android:windowSplashScreenBackground">).*?(</item>)',
-                  r'\1#101719\2',
+                  r'\\1#101719\\2',
                   text,
               )
+              if icon_count == 0:
+                  text = text.replace(
+                      '</style>',
+                      '    <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_transparent</item>\\n    </style>',
+                      1,
+                  )
+              if bg_count == 0:
+                  text = text.replace(
+                      '</style>',
+                      '    <item name="android:windowSplashScreenBackground">#101719</item>\\n    </style>',
+                      1,
+                  )
               styles.write_text(text)
+          assert '@drawable/splash_transparent' in styles.read_text(), 'Native splash icon override was not applied'
           PY
 
       - name: Apply approved DainPay launcher icon

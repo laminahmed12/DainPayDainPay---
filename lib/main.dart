@@ -39,14 +39,33 @@ class DainPayBootstrap extends StatefulWidget {
   State<DainPayBootstrap> createState() => _DainPayBootstrapState();
 }
 
-class _DainPayBootstrapState extends State<DainPayBootstrap> {
+class _DainPayBootstrapState extends State<DainPayBootstrap>
+    with WidgetsBindingObserver {
   Store? _store;
   Object? _loadError;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadStore();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      final store = _store;
+      if (store != null) {
+        unawaited(store.backupIfDueOnBackground());
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   Future<void> _loadStore() async {
@@ -551,6 +570,7 @@ class Store extends ChangeNotifier {
   final Set<String> pendingDeletedCustomerIds = <String>{};
   final FlutterSecureStorage secureStorage = const FlutterSecureStorage();
   Timer? _localBackupTimer;
+  bool _backgroundBackupInProgress = false;
 
   bool _disposed = false;
   bool _syncQueued = false;
@@ -796,7 +816,10 @@ class Store extends ChangeNotifier {
 
   void _queueEncryptedLocalBackup() {
     _localBackupTimer?.cancel();
-    _localBackupTimer = Timer(const Duration(milliseconds: 1200), () async {
+    // Debounce encrypted snapshots so ordinary edits do not trigger expensive
+    // encryption repeatedly. The primary SharedPreferences save above remains
+    // immediate; this timer only controls the redundant encrypted A/B snapshot.
+    _localBackupTimer = Timer(const Duration(minutes: 10), () async {
       try {
         final localKey = await ensureLocalBackupKey();
         final ok = await backupService.saveLocal(
@@ -815,6 +838,32 @@ class Store extends ChangeNotifier {
         debugPrint('Background local backup error: $e');
       }
     });
+  }
+
+  Future<void> backupIfDueOnBackground() async {
+    if (_disposed || _backgroundBackupInProgress) return;
+
+    const minimumInterval = Duration(minutes: 10);
+    final last = lastLocalBackupAt;
+    if (last != null && DateTime.now().difference(last) < minimumInterval) {
+      // Keep the previous recovery point when the app is quickly backgrounded.
+      // This also makes a deliberate restore test possible after a recent backup.
+      return;
+    }
+
+    _backgroundBackupInProgress = true;
+    _localBackupTimer?.cancel();
+    try {
+      final result = await createLocalBackupNow();
+      if (!result.success) {
+        debugPrint('Background local snapshot skipped: ${result.message}');
+      }
+    } catch (e, stack) {
+      debugPrint('Background local snapshot error: $e');
+      debugPrintStack(stackTrace: stack);
+    } finally {
+      _backgroundBackupInProgress = false;
+    }
   }
 
   Future<DainPayBackupResult> createLocalBackupNow() async {

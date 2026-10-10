@@ -81,12 +81,12 @@ jobs:
               text = styles.read_text()
               text, icon_count = re.subn(
                   r'(<item name="android:windowSplashScreenAnimatedIcon">).*?(</item>)',
-                  r'\\1@drawable/splash_transparent\\2',
+                  lambda m: m.group(1) + '@drawable/splash_transparent' + m.group(2),
                   text,
               )
               text, bg_count = re.subn(
                   r'(<item name="android:windowSplashScreenBackground">).*?(</item>)',
-                  r'\\1#101719\\2',
+                  lambda m: m.group(1) + '#101719' + m.group(2),
                   text,
               )
               if icon_count == 0:

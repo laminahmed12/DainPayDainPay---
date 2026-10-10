@@ -2813,15 +2813,6 @@ class _ActivationPageState extends State<ActivationPage> {
   Future<void> activate() async {
     if (busy) return;
 
-    if (!widget.store.firebaseReady) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'لا يوجد اتصال بالخدمة حالياً. حاول بعد الاتصال بالإنترنت.')),
-      );
-      return;
-    }
-
     final entered = code.text.trim();
     if (entered.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2880,7 +2871,10 @@ class _ActivationPageState extends State<ActivationPage> {
           ),
           TextField(
             controller: code,
-            keyboardType: TextInputType.number,
+            keyboardType: TextInputType.text,
+            textCapitalization: TextCapitalization.characters,
+            autocorrect: false,
+            enableSuggestions: false,
             textInputAction: TextInputAction.done,
             decoration: const InputDecoration(labelText: 'كود التفعيل'),
             onSubmitted: (_) => activate(),
@@ -2915,20 +2909,20 @@ class _AdminGateState extends State<AdminGate> {
     super.dispose();
   }
 
-  void enter() {
+  Future<void> enter() async {
     if (busy) return;
-
-    final navigator = Navigator.of(context);
-    final valid = widget.store.checkAdminLocal(pin.text);
-
+    setState(() => busy = true);
+    final valid = await widget.store.loginOwner(pin.text);
+    if (!mounted) return;
+    setState(() => busy = false);
     if (valid) {
-      navigator.pop();
-      navigator.push(
+      Navigator.of(context).pop();
+      Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => AdminPage(store: widget.store)),
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('رمز المالك غير صحيح')),
+        const SnackBar(content: Text('تعذر دخول المالك. تحقق من الرمز والاتصال بخدمة Cloudflare.')),
       );
     }
   }
@@ -2979,13 +2973,6 @@ class _AdminPageState extends State<AdminPage> {
   Future<void> generate() async {
     if (busy) return;
 
-    if (!widget.store.firebaseReady) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Firebase غير متصل')),
-      );
-      return;
-    }
-
     setState(() => busy = true);
     String? generated;
     try {
@@ -3018,9 +3005,7 @@ class _AdminPageState extends State<AdminPage> {
             child: ListTile(
               leading: const Icon(Icons.admin_panel_settings_outlined),
               title: const Text('وضع المالك'),
-              subtitle: Text(store.firebaseReady
-                  ? 'متصل بـ Firebase'
-                  : 'غير متصل بـ Firebase'),
+              subtitle: const Text('دخول المالك وتوليد الرموز عبر Cloudflare'),
             ),
           ),
           const Card(
@@ -3044,15 +3029,32 @@ class _AdminPageState extends State<AdminPage> {
                   style: const TextStyle(
                       fontSize: 25, fontWeight: FontWeight.w900),
                 ),
-                trailing: result.length == 6
-                    ? IconButton(
-                        onPressed: () {
-                          launchWhatsApp(
-                            '+218934951072',
-                            'رمز تفعيل DainPay: $result',
-                          );
-                        },
-                        icon: const Icon(Icons.send),
+                trailing: RegExp(r'^[A-Z0-9]{24}$').hasMatch(result)
+                    ? Wrap(
+                        spacing: 0,
+                        children: [
+                          IconButton(
+                            tooltip: 'نسخ رمز التفعيل',
+                            onPressed: () async {
+                              await Clipboard.setData(ClipboardData(text: result));
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('تم نسخ رمز التفعيل')),
+                              );
+                            },
+                            icon: const Icon(Icons.copy_rounded),
+                          ),
+                          IconButton(
+                            tooltip: 'إرسال الرمز عبر واتساب',
+                            onPressed: () {
+                              launchWhatsApp(
+                                '+218934951072',
+                                'رمز تفعيل DainPay: $result',
+                              );
+                            },
+                            icon: const Icon(Icons.send),
+                          ),
+                        ],
                       )
                     : null,
               ),

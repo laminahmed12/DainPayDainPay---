@@ -2120,6 +2120,9 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
   final speech = stt.SpeechToText();
   bool listening = false;
   bool initializing = false;
+  bool speechInitialized = false;
+  bool speechAvailable = false;
+  String? speechLocaleId;
   String live = '';
 
   int? amountCentsFromText(String text) {
@@ -2209,7 +2212,9 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     if (listening) {
       try {
         await speech.stop();
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('Speech stop error: $e');
+      }
       if (mounted) setState(() => listening = false);
       return;
     }
@@ -2218,78 +2223,85 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
 
     try {
       if (!await _ensureMicrophonePermission()) return;
-      await speech.cancel();
-      final available = await speech.initialize(
-        debugLogging: false,
-        onStatus: (status) {
-          if (!mounted) return;
-          if (status == 'notListening' || status == 'done') {
+
+      // speech_to_text is designed to be initialized once per app session.
+      // Reinitializing on every tap can leave Android recognition callbacks
+      // in an inconsistent state on some devices.
+      if (!speechInitialized || !speechAvailable) {
+        final available = await speech.initialize(
+          debugLogging: false,
+          onStatus: (status) {
+            debugPrint('Speech status: $status');
+            if (!mounted) return;
+            if (status == 'notListening' || status == 'done') {
+              setState(() => listening = false);
+            }
+          },
+          onError: (error) {
+            debugPrint('Speech error: ${error.errorMsg} (permanent: ${error.permanent})');
+            if (!mounted) return;
             setState(() => listening = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'تعذر تشغيل التعرف الصوتي: ${error.errorMsg}. تحقق من الميكروفون وخدمة التعرف الصوتي.',
+                ),
+              ),
+            );
+          },
+        );
+
+        speechInitialized = available;
+        speechAvailable = available;
+        if (!available) {
+          if (mounted) {
+            await showDialog<void>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: const Text('التعرف الصوتي غير متاح'),
+                content: const Text(
+                  'لم يتمكن الهاتف من تشغيل خدمة التعرف الصوتي. '
+                  'تأكد من صلاحية الميكروفون وتفعيل خدمة التعرف الصوتي في الهاتف، ثم أعد المحاولة.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('إغلاق'),
+                  ),
+                  FilledButton(
+                    onPressed: () async {
+                      Navigator.pop(context);
+                      await openAppSettings();
+                    },
+                    child: const Text('إعدادات التطبيق'),
+                  ),
+                ],
+              ),
+            );
           }
-        },
-        onError: (error) {
-          debugPrint('Speech error: $error');
-          if (!mounted) return;
-          setState(() => listening = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'تعذر تشغيل التعرف الصوتي. تحقق من الميكروفون وخدمة التعرف الصوتي.',
-              ),
-            ),
-          );
-        },
-      );
-
-      if (!available) {
-        if (mounted) {
-          await showDialog<void>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text('التعرف الصوتي غير متاح'),
-              content: const Text(
-                'لم يتمكن DainPay من تشغيل خدمة التعرف الصوتي. '
-                'تأكد من منح الميكروفون صلاحية الاستخدام وأن خدمة التعرف الصوتي في الهاتف مفعلة، ثم أعد المحاولة.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('إغلاق'),
-                ),
-                FilledButton(
-                  onPressed: () async {
-                    Navigator.pop(context);
-                    await openAppSettings();
-                  },
-                  child: const Text('إعدادات التطبيق'),
-                ),
-              ],
-            ),
-          );
+          return;
         }
-        return;
+
+        final locales = await speech.locales();
+        speechLocaleId = locales
+            .where((locale) => locale.localeId.toLowerCase() == 'ar-ly')
+            .map((locale) => locale.localeId)
+            .firstOrNull;
+        speechLocaleId ??= locales
+            .where((locale) => locale.localeId.toLowerCase().startsWith('ar-'))
+            .map((locale) => locale.localeId)
+            .firstOrNull;
+        speechLocaleId ??= 'ar';
+        debugPrint('Selected speech locale: $speechLocaleId');
       }
 
-      if (!mounted) return;
-
-      final locales = await speech.locales();
-      String? arabicLocale;
-      for (final locale in locales) {
-        if (locale.localeId.toLowerCase() == 'ar-ly') {
-          arabicLocale = locale.localeId;
-          break;
-        }
-      }
-      arabicLocale ??= locales
-          .where((locale) => locale.localeId.toLowerCase().startsWith('ar-'))
-          .map((locale) => locale.localeId)
-          .firstOrNull;
-
-      setState(() => listening = true);
+      await speech.cancel();
+      live = '';
+      if (mounted) setState(() => listening = true);
 
       await speech.listen(
         listenOptions: stt.SpeechListenOptions(
-          localeId: arabicLocale ?? 'ar-LY',
+          localeId: speechLocaleId ?? 'ar',
           partialResults: true,
           cancelOnError: true,
         ),
@@ -2299,35 +2311,39 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
 
           if (!result.finalResult) return;
 
-          final text = result.recognizedWords.trim();
-          if (text.isNotEmpty) {
+          final recognizedText = result.recognizedWords.trim();
+          if (recognizedText.isNotEmpty) {
             widget.store.voiceDrafts.insert(
               0,
               VoiceDraft(
                 id: makeId(),
-                text: text,
+                text: recognizedText,
                 date: DateTime.now(),
-                customerId: findCustomer(text),
-                amountCents: amountCentsFromText(text) ?? 0,
-                note: text,
+                customerId: findCustomer(recognizedText),
+                amountCents: amountCentsFromText(recognizedText) ?? 0,
+                note: recognizedText,
               ),
             );
             await widget.store.saveLocal();
             widget.store.safeNotify();
+          } else if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('لم يتم التعرف على كلام. حاول الاقتراب من الميكروفون ثم أعد التسجيل.')),
+            );
           }
 
           if (mounted) setState(() => listening = false);
         },
       );
-    } catch (e) {
+    } catch (e, stack) {
       debugPrint('Speech start error: $e');
+      debugPrintStack(stackTrace: stack);
       if (mounted) {
         setState(() => listening = false);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'تعذر تشغيل التعرف الصوتي. تحقق من صلاحية الميكروفون '
-              'وخدمة التعرف الصوتي في الهاتف.',
+              'تعذر بدء التسجيل الصوتي. تحقق من صلاحية الميكروفون واتصال خدمة التعرف الصوتي.',
             ),
           ),
         );
@@ -3029,15 +3045,44 @@ class _AdminPageState extends State<AdminPage> {
                   style: const TextStyle(
                       fontSize: 25, fontWeight: FontWeight.w900),
                 ),
-                trailing: result.length >= 20
-                    ? IconButton(
-                        onPressed: () {
-                          launchWhatsApp(
-                            '+218934951072',
-                            'رمز تفعيل DainPay: $result',
-                          );
-                        },
-                        icon: const Icon(Icons.send),
+                trailing: RegExp(r'^[A-Z0-9]{24}
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+extension FirstOrNullExtension<T> on Iterable<T> {
+  T? get firstOrNull => isEmpty ? null : first;
+}
+).hasMatch(result)
+                    ? Wrap(
+                        spacing: 0,
+                        children: [
+                          IconButton(
+                            tooltip: 'نسخ رمز التفعيل',
+                            onPressed: () async {
+                              await Clipboard.setData(ClipboardData(text: result));
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('تم نسخ رمز التفعيل')),
+                              );
+                            },
+                            icon: const Icon(Icons.copy_rounded),
+                          ),
+                          IconButton(
+                            tooltip: 'إرسال الرمز عبر واتساب',
+                            onPressed: () {
+                              launchWhatsApp(
+                                '+218934951072',
+                                'رمز تفعيل DainPay: $result',
+                              );
+                            },
+                            icon: const Icon(Icons.send),
+                          ),
+                        ],
                       )
                     : null,
               ),

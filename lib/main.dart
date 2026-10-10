@@ -2628,6 +2628,78 @@ class _VoiceReviewPageState extends State<VoiceReviewPage> {
     super.dispose();
   }
 
+  Future<void> addCustomerQuickly() async {
+    final customerName = TextEditingController();
+    final customerPhone = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    final create = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('إضافة زبون جديد'),
+        content: Form(
+          key: formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: customerName,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'اسم الزبون'),
+                validator: (value) => value == null || value.trim().isEmpty
+                    ? 'أدخل اسم الزبون'
+                    : null,
+              ),
+              TextField(
+                controller: customerPhone,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(labelText: 'رقم الهاتف (اختياري)'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState?.validate() == true) {
+                Navigator.pop(dialogContext, true);
+              }
+            },
+            child: const Text('حفظ الزبون'),
+          ),
+        ],
+      ),
+    );
+
+    if (create == true && mounted) {
+      final customer = Customer(
+        id: makeId(),
+        name: customerName.text.trim(),
+        phone: customerPhone.text.trim(),
+        limitCents: 0,
+      );
+      final saved = await widget.store.saveCustomer(customer);
+      if (mounted) {
+        if (saved) {
+          setState(() => customerId = customer.id);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('تمت إضافة الزبون وتحديده.')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('يوجد زبون بنفس الاسم ورقم الهاتف.')),
+          );
+        }
+      }
+    }
+    customerName.dispose();
+    customerPhone.dispose();
+  }
+
   Future<void> approve() async {
     if (busy) return;
 
@@ -2708,6 +2780,14 @@ class _VoiceReviewPageState extends State<VoiceReviewPage> {
                   value: customer.id, child: Text(customer.name)))
               .toList(),
           onChanged: (value) => setState(() => customerId = value ?? ''),
+        ),
+        Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: OutlinedButton.icon(
+            onPressed: busy ? null : addCustomerQuickly,
+            icon: const Icon(Icons.person_add_alt_1),
+            label: const Text('إضافة زبون جديد'),
+          ),
         ),
         SegmentedButton<String>(
           segments: const [

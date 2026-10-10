@@ -28,7 +28,8 @@ class DainPayBackupResult {
 
 class DainPayBackupService {
   static const _scope = 'https://www.googleapis.com/auth/drive.appdata';
-  static const _fileName = 'DainPay_Backup.dpb';
+  static const _fileName = 'DainPay_Backup.dpb'; // legacy single-file backup
+  static const _versionPrefix = 'DainPay_Backup_';
   static const _localA = 'DainPay_Backup_A.dpb';
   static const _localB = 'DainPay_Backup_B.dpb';
   static const _mime = 'application/octet-stream';
@@ -235,7 +236,8 @@ class DainPayBackupService {
 
   Future<String?> _findFile(String token) async {
     final query = Uri.encodeQueryComponent(
-      "name = '$_fileName' and trashed = false and 'appDataFolder' in parents",
+      "(name contains '$_versionPrefix' or name = '$_fileName') "
+      "and trashed = false and 'appDataFolder' in parents",
     );
     final uri = Uri.parse(
       'https://www.googleapis.com/drive/v3/files'
@@ -264,13 +266,14 @@ class DainPayBackupService {
     String token,
     String content, {
     String? fileId,
+    String fileName = _fileName,
   }) async {
     final bytes = utf8.encode(content);
 
     if (fileId == null) {
       final boundary = 'dainpay_${DateTime.now().microsecondsSinceEpoch}';
       final metadata = jsonEncode({
-        'name': _fileName,
+        'name': fileName,
         'parents': ['appDataFolder'],
       });
       final body = <int>[];
@@ -361,8 +364,16 @@ class DainPayBackupService {
       if (token != null && account != null) {
         final driveKey = driveKeyForAccountId(account.id);
         final encrypted = await encrypt(payload, driveKey);
-        final existing = await _findFile(token);
-        await _upload(token, encrypted, fileId: existing);
+        final now = DateTime.now().toUtc();
+        final stamp = '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_'
+            '${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}';
+        // Create a new cloud generation every time. Never overwrite the last
+        // known-good backup with a possibly incomplete or invalid generation.
+        await _upload(
+          token,
+          encrypted,
+          fileName: '$_versionPrefix$stamp.dpb',
+        );
         cloudSaved = true;
       }
     } catch (e) {
@@ -417,9 +428,25 @@ class DainPayBackupService {
         details.contains('Drive upload failed: 401')) {
       return 'انتهت صلاحية تفويض Google. أعد اختيار حساب Google ثم حاول مجدداً.';
     }
-    if (details.contains('Drive list failed: 403') ||
-        details.contains('Drive upload failed: 403')) {
-      return 'رفض Google Drive الطلب (403). تحقق من تفعيل Drive API ومنح التطبيق صلاحية الوصول.';
+    if (details.contains('403')) {
+      final lower = details.toLowerCase();
+      if (lower.contains('accessnotconfigured') ||
+          lower.contains('drive api has not been used') ||
+          lower.contains('drive api is disabled')) {
+        return 'Google Drive API غير مفعّلة في مشروع Google Cloud المرتبط بالتطبيق. '
+            'فعّل Google Drive API في المشروع dainpay-a29fc ثم انتظر بضع دقائق وأعد المحاولة.';
+      }
+      if (lower.contains('insufficientpermissions') ||
+          lower.contains('insufficient permissions') ||
+          lower.contains('appnotauthorizedtofile')) {
+        return 'Google رفض صلاحية الوصول إلى ملفات Drive. أعد اختيار حساب Google ووافق على صلاحية Drive، '
+            'وتحقق من إعداد OAuth ونشر شاشة الموافقة.';
+      }
+      if (lower.contains('daily limit') || lower.contains('quota')) {
+        return 'تجاوز مشروع Google حصة Drive API. راجع الحصص في Google Cloud Console.';
+      }
+      return 'رفض Google Drive الطلب (403). تفاصيل الخطأ: '
+          '${_extractGoogleError(details)}. راجع تفعيل Drive API وصلاحيات OAuth.';
     }
     if (details.contains('Drive list failed: 404') ||
         details.contains('Drive upload failed: 404')) {
@@ -431,6 +458,27 @@ class DainPayBackupService {
       return 'تعذر الاتصال بالإنترنت أثناء الوصول إلى Google Drive.';
     }
     return details.replaceFirst('Bad state: ', '');
+  }
+
+  String _extractGoogleError(String details) {
+    final start = details.indexOf('{');
+    if (start < 0) return details;
+    try {
+      final decoded = jsonDecode(details.substring(start));
+      if (decoded is Map) {
+        final error = decoded['error'];
+        if (error is Map) {
+          final message = error['message'];
+          final errors = error['errors'];
+          final reason = errors is List && errors.isNotEmpty && errors.first is Map
+              ? errors.first['reason']
+              : null;
+          return [if (reason != null) '$reason', if (message != null) '$message']
+              .join(': ');
+        }
+      }
+    } catch (_) {}
+    return details;
   }
 
   Future<Map<String, dynamic>> restore() async {

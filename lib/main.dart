@@ -2672,7 +2672,6 @@ class _SettingsPageState extends State<SettingsPage> {
                   icon: const Icon(Icons.switch_account_rounded),
                   label: const Text('تغيير حساب Google للنسخ الاحتياطي'),
                 ),
-                ),
               ],
             ),
           ),

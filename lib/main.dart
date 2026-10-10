@@ -1432,7 +1432,6 @@ class _HomePageState extends State<HomePage> {
                   label: const Text('الكل'),
                   selected: filter == 'all',
                   onSelected: (_) => setState(() => filter = 'all'),
-                ),
               ],
             ),
             const SizedBox(height: 4),
@@ -2637,8 +2636,7 @@ class _SettingsPageState extends State<SettingsPage> {
                           controller: controller,
                           autofocus: true,
                           textCapitalization: TextCapitalization.characters,
-                          decoration:
-                              const InputDecoration(labelText: 'رمز الاسترداد'),
+                          decoration: const InputDecoration(labelText: 'رمز الاسترداد'),
                         ),
                         actions: [
                           TextButton(
@@ -2646,25 +2644,17 @@ class _SettingsPageState extends State<SettingsPage> {
                             child: const Text('إلغاء'),
                           ),
                           FilledButton(
-                            onPressed: () => Navigator.pop(
-                              context,
-                              controller.text.trim(),
-                            ),
+                            onPressed: () => Navigator.pop(context, controller.text.trim()),
                             child: const Text('استعادة'),
                           ),
                         ],
                       ),
                     );
                     controller.dispose();
-                    if (recovery == null ||
-                        recovery.isEmpty ||
-                        !context.mounted) return;
-                    final result =
-                        await store.restoreFromLocalBackup(recovery);
+                    if (recovery == null || recovery.isEmpty || !context.mounted) return;
+                    final result = await store.restoreFromLocalBackup(recovery);
                     if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(result.message)),
-                    );
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.message)));
                   },
                   icon: const Icon(Icons.phone_android_rounded),
                   label: const Text('استعادة من النسخة المحلية'),

@@ -155,8 +155,12 @@ jobs:
         run: flutter build apk --release
       - name: Record release signing certificate
         run: |
-          find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1 | xargs -I{} {} verify --print-certs build/app/outputs/flutter-apk/app-release.apk > release-signing-certificate.txt || true
-          cat release-signing-certificate.txt
+          set -euo pipefail
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER"
+          "$APKSIGNER" verify --print-certs "$APK" | tee release-signing-certificate.txt
+          test -s release-signing-certificate.txt
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:

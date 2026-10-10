@@ -2230,6 +2230,13 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       if (!speechInitialized || !speechAvailable) {
         final available = await speech.initialize(
           debugLogging: false,
+          // Preserve the Android recognition options from the last known-good
+          // DainPay voice build. These avoid Bluetooth and intent lookup
+          // problems on Android devices where speech recognition otherwise fails.
+          options: [
+            stt.SpeechToText.androidNoBluetooth,
+            stt.SpeechToText.androidIntentLookup,
+          ],
           onStatus: (status) {
             debugPrint('Speech status: $status');
             if (!mounted) return;

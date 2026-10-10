@@ -2,7 +2,7 @@ name: DainPay Android Release
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, v82-unified-repair ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:

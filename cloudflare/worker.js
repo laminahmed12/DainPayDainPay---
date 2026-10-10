@@ -16,7 +16,9 @@ export default {
    const prior=await env.ACTIVATION_CODES.get(failKey);
    const attempts=prior?Number(JSON.parse(prior).count||0):0;
    if(attempts>=5)return json({success:false,error:'too_many_attempts'},429);
-   if(clean(data.adminPin)!==env.OWNER_ADMIN_PIN){
+   // Normalize both values so Arabic/Persian digits and accidental surrounding spaces
+   // do not cause a false rejection when the same PIN was configured in Cloudflare.
+   if(clean(data.adminPin)!==clean(env.OWNER_ADMIN_PIN)){
     await env.ACTIVATION_CODES.put(failKey,JSON.stringify({count:attempts+1}),{expirationTtl:900});
     return json({success:false,error:'owner_denied'},403);
    }

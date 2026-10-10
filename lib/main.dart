@@ -950,31 +950,74 @@ class Store extends ChangeNotifier {
       );
     }
 
-    final restoredCustomers = <Customer>[];
-    for (final item in rawCustomers) {
-      if (item is Map) {
-        restoredCustomers.add(
-          Customer.fromJson(Map<String, dynamic>.from(item)),
-        );
-      }
+    // Reject partial/malformed payloads before touching the current ledger.
+    if (rawCustomers.any((item) => item is! Map) ||
+        rawTransactions.any((item) => item is! Map) ||
+        rawDrafts.any((item) => item is! Map)) {
+      return const DainPayBackupResult(
+        success: false,
+        message: 'النسخة تحتوي على سجلات غير صالحة؛ لم تتغير البيانات الحالية.',
+      );
     }
 
-    final restoredTransactions = <Tx>[];
-    for (final item in rawTransactions) {
-      if (item is Map) {
-        restoredTransactions.add(
-          Tx.fromJson(Map<String, dynamic>.from(item)),
-        );
-      }
+    final restoredCustomers = rawCustomers
+        .map((item) => Customer.fromJson(Map<String, dynamic>.from(item as Map)))
+        .toList();
+    final restoredTransactions = rawTransactions
+        .map((item) => Tx.fromJson(Map<String, dynamic>.from(item as Map)))
+        .toList();
+    final restoredDrafts = rawDrafts
+        .map((item) => VoiceDraft.fromJson(Map<String, dynamic>.from(item as Map)))
+        .toList();
+
+    final customerIds = restoredCustomers.map((c) => c.id).toList();
+    if (customerIds.any((id) => id.trim().isEmpty) ||
+        customerIds.toSet().length != customerIds.length) {
+      return const DainPayBackupResult(
+        success: false,
+        message: 'معرّفات العملاء في النسخة غير صالحة أو مكررة؛ لم تتغير البيانات الحالية.',
+      );
+    }
+    final customerIdSet = customerIds.toSet();
+    final transactionIds = restoredTransactions.map((tx) => tx.id).toList();
+    if (transactionIds.any((id) => id.trim().isEmpty) ||
+        transactionIds.toSet().length != transactionIds.length ||
+        restoredTransactions.any((tx) =>
+            !customerIdSet.contains(tx.customerId) ||
+            tx.amountCents <= 0 ||
+            (tx.type != 'debt' && tx.type != 'payment'))) {
+      return const DainPayBackupResult(
+        success: false,
+        message: 'سجلات المعاملات غير متطابقة مع العملاء أو غير صالحة؛ لم تتغير البيانات الحالية.',
+      );
+    }
+    final draftIds = restoredDrafts.map((draft) => draft.id).toList();
+    if (draftIds.any((id) => id.trim().isEmpty) ||
+        draftIds.toSet().length != draftIds.length) {
+      return const DainPayBackupResult(
+        success: false,
+        message: 'معرّفات المسودات الصوتية غير صالحة؛ لم تتغير البيانات الحالية.',
+      );
     }
 
-    final restoredDrafts = <VoiceDraft>[];
-    for (final item in rawDrafts) {
-      if (item is Map) {
-        restoredDrafts.add(
-          VoiceDraft.fromJson(Map<String, dynamic>.from(item)),
+    // Preserve the current ledger as an encrypted recovery point before restore.
+    try {
+      final localKey = await ensureLocalBackupKey();
+      final preserved = await backupService.saveLocal(
+        payload: backupPayload(),
+        localKey: localKey,
+      );
+      if (!preserved) {
+        return const DainPayBackupResult(
+          success: false,
+          message: 'تعذر تأمين نسخة من البيانات الحالية قبل الاستعادة؛ أُلغيت الاستعادة.',
         );
       }
+    } catch (e) {
+      return DainPayBackupResult(
+        success: false,
+        message: 'تعذر تأمين نسخة من البيانات الحالية قبل الاستعادة؛ أُلغيت العملية: $e',
+      );
     }
 
     customers

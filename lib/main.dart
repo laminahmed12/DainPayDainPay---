@@ -22,7 +22,7 @@ const Color burgundy = Color(0xFFE63946);
 
 const int trialLengthDays = 7;
 const String cloudflareActivationUrl = 'https://dainpay-activation.lamin-ahmed12.workers.dev';
-const String appTitle = 'DainPay — دَيْن';
+const String appTitle = 'دفتر الديون';
 const String functionsRegion = 'us-central1';
 
 Future<void> main() async {
@@ -1214,10 +1214,91 @@ class DainPayApp extends StatelessWidget {
           themeMode: store.dark ? ThemeMode.dark : ThemeMode.light,
           home: Directionality(
             textDirection: TextDirection.rtl,
-            child: HomePage(store: store),
+            child: WelcomePage(store: store),
           ),
         );
       },
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Short welcome screen
+// -----------------------------------------------------------------------------
+
+class WelcomePage extends StatefulWidget {
+  const WelcomePage({super.key, required this.store});
+
+  final Store store;
+
+  @override
+  State<WelcomePage> createState() => _WelcomePageState();
+}
+
+class _WelcomePageState extends State<WelcomePage> {
+  Timer? _welcomeTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _welcomeTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute<void>(
+          builder: (_) => Directionality(
+            textDirection: TextDirection.rtl,
+            child: HomePage(store: widget.store),
+          ),
+        ),
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _welcomeTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: Color(0xFF101719),
+      body: Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.menu_book_rounded,
+                size: 66,
+                color: Color(0xFF2EC4B6),
+              ),
+              SizedBox(height: 16),
+              Text(
+                'دفتر الديون',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 29,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'ديونك محفوظة.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Color(0xFF2EC4B6),
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

@@ -6,10 +6,10 @@ import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_functions/firebase_functions.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'backup_service.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
@@ -20,7 +20,7 @@ const Color mint = Color(0xFF2EC4B6);
 const Color burgundy = Color(0xFFE63946);
 
 const int trialLengthDays = 7;
-const String adminPin = '116936';
+const String cloudflareActivationUrl = 'https://dainpay-activation.lamin-ahmed12.workers.dev';
 const String appTitle = 'DainPay — دَيْن';
 
 Future<void> main() async {
@@ -422,6 +422,7 @@ class Store extends ChangeNotifier {
   bool activated = false;
   bool dark = false;
   bool isAdmin = false;
+  String ownerToken = '';
 
   final DainPayBackupService backupService = DainPayBackupService();
   String backupRecoveryCode = '';
@@ -1082,67 +1083,34 @@ class Store extends ChangeNotifier {
   }
 
   Future<bool> activateCode(String code) async {
-    if (!firebaseReady || uid.isEmpty) return false;
-
-    final clean = _digits(code).trim();
-    if (clean.isEmpty) return false;
-
+    final cleanCode = _digits(code).trim().replaceAll(RegExp(r'\\s+'), '');
+    if (cleanCode.isEmpty) return false;
     try {
-      final callable = FirebaseFunctions.instance.httpsCallable(
-        'redeemActivationCode',
-      );
-      final result = await callable.call({
-        'code': clean,
-        'deviceId': deviceId,
-      });
-      final data = result.data;
-      final success = data is Map && data['success'] == true;
-      if (!success) return false;
-
-      activated = true;
-      await saveLocal();
-      safeNotify();
-      return true;
-    } on FirebaseFunctionsException catch (e) {
-      debugPrint('Activation function error: ${e.code}: ${e.message}');
-      return false;
-    } catch (e) {
-      debugPrint('Activation error: $e');
-      return false;
-    }
+      final response = await http.post(Uri.parse(cloudflareActivationUrl), headers: const {'content-type':'application/json'}, body: jsonEncode({'action':'redeem','code':cleanCode,'deviceId':deviceId})).timeout(const Duration(seconds:15));
+      if (response.statusCode != 200) return false;
+      final data = jsonDecode(response.body);
+      if (data is! Map || data['success'] != true) return false;
+      activated = true; await saveLocal();
+      if (firebaseReady && uid.isNotEmpty) { try { await userRef.doc(uid).set({'activated':true,'activatedAt':FieldValue.serverTimestamp(),'activatedDeviceId':deviceId},SetOptions(merge:true)); } catch(e){debugPrint('Activation cloud mirror failed: $e');} }
+      safeNotify(); return true;
+    } catch(e){debugPrint('Cloudflare activation error: $e');return false;}
   }
-
+  Future<bool> loginOwner(String pin) async {
+    try {
+      final response=await http.post(Uri.parse(cloudflareActivationUrl),headers:const {'content-type':'application/json'},body:jsonEncode({'action':'owner_login','adminPin':_digits(pin).trim()})).timeout(const Duration(seconds:15));
+      if(response.statusCode!=200)return false; final data=jsonDecode(response.body);
+      if(data is! Map||data['success']!=true||data['token'] is! String)return false;
+      ownerToken=data['token'] as String;isAdmin=true;safeNotify();return true;
+    }catch(e){debugPrint('Cloudflare owner login error: $e');return false;}
+  }
   Future<String?> generateCode() async {
-    if (!firebaseReady || !isAdmin || uid.isEmpty) return null;
-
-    try {
-      final callable = FirebaseFunctions.instance.httpsCallable(
-        'generateActivationCode',
-      );
-      final result = await callable.call({
-        'adminPin': adminPin,
-        'deviceId': deviceId,
-      });
-      final data = result.data;
-      if (data is Map && data['code'] is String) {
-        return data['code'] as String;
-      }
-      return null;
-    } on FirebaseFunctionsException catch (e) {
-      debugPrint('Generate activation function error: ${e.code}: ${e.message}');
-      rethrow;
-    } catch (e) {
-      debugPrint('Generate activation code error: $e');
-      rethrow;
-    }
+    if(!isAdmin||ownerToken.isEmpty)throw StateError('جلسة المالك غير صالحة. سجّل الدخول مجدداً.');
+    final response=await http.post(Uri.parse(cloudflareActivationUrl),headers:const {'content-type':'application/json'},body:jsonEncode({'action':'generate','ownerToken':ownerToken})).timeout(const Duration(seconds:15));
+    final data=jsonDecode(response.body);
+    if(response.statusCode!=200||data is! Map||data['success']!=true||data['code'] is! String){final message=data is Map?(data['error']??'تعذر توليد الرمز'):'استجابة غير صالحة';throw StateError('$message');}
+    return data['code'] as String;
   }
 
-  bool checkAdminLocal(String pin) {
-    final valid = _digits(pin).trim() == adminPin;
-    isAdmin = valid;
-    safeNotify();
-    return valid;
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -2857,22 +2825,11 @@ class _AdminGateState extends State<AdminGate> {
     super.dispose();
   }
 
-  void enter() {
-    if (busy) return;
-
-    final navigator = Navigator.of(context);
-    final valid = widget.store.checkAdminLocal(pin.text);
-
-    if (valid) {
-      navigator.pop();
-      navigator.push(
-        MaterialPageRoute(builder: (_) => AdminPage(store: widget.store)),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('رمز المالك غير صحيح')),
-      );
-    }
+  Future<void> enter() async {
+    if(busy)return;setState(()=>busy=true);final valid=await widget.store.loginOwner(pin.text);
+    if(!mounted)return;setState(()=>busy=false);
+    if(valid){Navigator.of(context).pop();Navigator.of(context).push(MaterialPageRoute(builder:(_)=>AdminPage(store:widget.store)));}
+    else{ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تعذر دخول المالك: تحقق من الرمز والاتصال بالخدمة')));}
   }
 
   @override
@@ -2921,13 +2878,6 @@ class _AdminPageState extends State<AdminPage> {
   Future<void> generate() async {
     if (busy) return;
 
-    if (!widget.store.firebaseReady) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Firebase غير متصل')),
-      );
-      return;
-    }
-
     setState(() => busy = true);
     String? generated;
     try {
@@ -2958,9 +2908,7 @@ class _AdminPageState extends State<AdminPage> {
             child: ListTile(
               leading: const Icon(Icons.admin_panel_settings_outlined),
               title: const Text('وضع المالك'),
-              subtitle: Text(store.firebaseReady
-                  ? 'متصل بـ Firebase'
-                  : 'غير متصل بـ Firebase'),
+              subtitle: const Text('جلسة المالك موثقة عبر Cloudflare Workers'),
             ),
           ),
           const Card(
@@ -2984,7 +2932,7 @@ class _AdminPageState extends State<AdminPage> {
                   style: const TextStyle(
                       fontSize: 25, fontWeight: FontWeight.w900),
                 ),
-                trailing: result.length == 6
+                trailing: result.length >= 20
                     ? IconButton(
                         onPressed: () {
                           launchWhatsApp(

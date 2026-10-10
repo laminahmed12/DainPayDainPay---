@@ -387,7 +387,8 @@ class DainPayBackupService {
         success: true,
         message: cloudError == null
             ? 'تم حفظ النسخة المشفرة محلياً.'
-            : 'تم حفظ نسخة محلية مشفرة. تعذر الوصول إلى Google Drive حالياً.',
+            : 'تم حفظ النسخة محلياً، لكن فشل Google Drive: '
+                '${_friendlyCloudError(cloudError)}',
         accountEmail: email,
         localSaved: true,
         cloudSaved: false,
@@ -399,6 +400,37 @@ class DainPayBackupService {
       message: 'فشل النسخ الاحتياطي المحلي والسحابي: $cloudError',
       accountEmail: email,
     );
+  }
+
+  String _friendlyCloudError(Object error) {
+    final details = error.toString();
+    final normalized = details.toLowerCase();
+
+    if (details.contains('API 10') ||
+        normalized.contains('developer_error') ||
+        normalized.contains('sign_in_failed')) {
+      return 'إعداد تسجيل الدخول من Google غير مكتمل (API 10). '
+          'يلزم تسجيل SHA-1 لشهادة توقيع APK في إعدادات تطبيق Android داخل Firebase، '
+          'وتفعيل Google Sign-In وGoogle Drive API، ثم تحديث google-services.json.';
+    }
+    if (details.contains('Drive list failed: 401') ||
+        details.contains('Drive upload failed: 401')) {
+      return 'انتهت صلاحية تفويض Google. أعد اختيار حساب Google ثم حاول مجدداً.';
+    }
+    if (details.contains('Drive list failed: 403') ||
+        details.contains('Drive upload failed: 403')) {
+      return 'رفض Google Drive الطلب (403). تحقق من تفعيل Drive API ومنح التطبيق صلاحية الوصول.';
+    }
+    if (details.contains('Drive list failed: 404') ||
+        details.contains('Drive upload failed: 404')) {
+      return 'لم يتم العثور على مورد Google Drive المطلوب (404).';
+    }
+    if (normalized.contains('socketexception') ||
+        normalized.contains('failed host lookup') ||
+        normalized.contains('network is unreachable')) {
+      return 'تعذر الاتصال بالإنترنت أثناء الوصول إلى Google Drive.';
+    }
+    return details.replaceFirst('Bad state: ', '');
   }
 
   Future<Map<String, dynamic>> restore() async {

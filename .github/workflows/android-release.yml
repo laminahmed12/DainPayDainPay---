@@ -20,21 +20,25 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.4'
           channel: stable
           cache: true
+
       - name: Preserve Firebase configuration
         run: |
           test -f android/app/google-services.json
           cp android/app/google-services.json /tmp/google-services.json
+
       - name: Reconstruct Android platform with the registered Firebase package
         run: |
           rm -rf android
@@ -42,6 +46,7 @@ jobs:
           mkdir -p android/app
           cp /tmp/google-services.json android/app/google-services.json
           rm -f test/widget_test.dart
+
       - name: Apply approved DainPay launcher icon
         run: |
           mkdir -p android/app/src/main/res/drawable-nodpi
@@ -53,6 +58,7 @@ jobs:
           text = text.replace('android:icon="@mipmap/ic_launcher"', 'android:icon="@drawable/dainpay_icon"')
           manifest.write_text(text)
           PY
+
       - name: Configure Android SDK and Firebase Gradle plugin
         run: |
           python3 - <<'PY'
@@ -87,8 +93,82 @@ jobs:
           text = text.replace('flutter.targetSdkVersion', '35')
           app.write_text(text)
           PY
+
+      # Release signing is configured only for trusted push/manual runs.
+      # Pull requests can still compile without access to repository secrets.
+      - name: Decode release keystore
+        if: github.event_name != 'pull_request'
+        env:
+          DAINPAY_KEYSTORE_BASE64: ${{ secrets.DAINPAY_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$DAINPAY_KEYSTORE_BASE64" || { echo "Missing DAINPAY_KEYSTORE_BASE64 secret"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/dainpay-signing"
+          printf '%s' "$DAINPAY_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/dainpay-signing/dainpay-release.jks"
+          test -s "$RUNNER_TEMP/dainpay-signing/dainpay-release.jks"
+          echo "DAINPAY_KEYSTORE_PATH=$RUNNER_TEMP/dainpay-signing/dainpay-release.jks" >> "$GITHUB_ENV"
+
+      - name: Configure release signing in generated Gradle file
+        if: github.event_name != 'pull_request'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          kts = Path('android/app/build.gradle.kts')
+          groovy = Path('android/app/build.gradle')
+          app = kts if kts.exists() else groovy
+          if not app.exists():
+              raise SystemExit('Generated app Gradle file not found')
+
+          text = app.read_text()
+          if 'signingConfigs' in text and 'dainpayReleaseSigning' in text:
+              raise SystemExit('Release signing patch appears to have already been applied')
+
+          if app.suffix == '.kts':
+              signing = '''
+              // DainPay permanent release key; credentials are read from GitHub Actions environment.
+              signingConfigs {
+                  create("dainpayReleaseSigning") {
+                      storeFile = file(System.getenv("DAINPAY_KEYSTORE_PATH"))
+                      storePassword = System.getenv("DAINPAY_STORE_PASSWORD")
+                      keyAlias = System.getenv("DAINPAY_KEY_ALIAS")
+                      keyPassword = System.getenv("DAINPAY_KEY_PASSWORD")
+                  }
+              }
+          '''
+              old_release = 'signingConfig = signingConfigs.getByName("debug")'
+              new_release = 'signingConfig = signingConfigs.getByName("dainpayReleaseSigning")'
+              if old_release not in text:
+                  raise SystemExit('Could not find default release signingConfig in build.gradle.kts')
+              text = text.replace(old_release, new_release, 1)
+          else:
+              signing = '''
+              // DainPay permanent release key; credentials are read from GitHub Actions environment.
+              signingConfigs {
+                  dainpayReleaseSigning {
+                      storeFile file(System.getenv("DAINPAY_KEYSTORE_PATH"))
+                      storePassword System.getenv("DAINPAY_STORE_PASSWORD")
+                      keyAlias System.getenv("DAINPAY_KEY_ALIAS")
+                      keyPassword System.getenv("DAINPAY_KEY_PASSWORD")
+                  }
+              }
+          '''
+              old_release = 'signingConfig signingConfigs.debug'
+              new_release = 'signingConfig signingConfigs.dainpayReleaseSigning'
+              if old_release not in text:
+                  raise SystemExit('Could not find default release signingConfig in build.gradle')
+              text = text.replace(old_release, new_release, 1)
+
+          marker = 'android {'
+          if marker not in text:
+              raise SystemExit('Could not find android block in app Gradle file')
+          text = text.replace(marker, marker + signing, 1)
+          app.write_text(text)
+          PY
+
       - name: Install dependencies
         run: flutter pub get
+
       - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json
@@ -138,10 +218,12 @@ jobs:
 
           manifest.write_text(text)
           PY
+
       - name: Verify Android speech configuration
         run: |
           grep -q 'android.permission.RECORD_AUDIO' android/app/src/main/AndroidManifest.xml
           grep -q 'android.speech.RecognitionService' android/app/src/main/AndroidManifest.xml
+
       - name: Verify DainPay screenshot fixes
         run: |
           grep -q "speech_to_text:" pubspec.yaml
@@ -149,10 +231,23 @@ jobs:
           grep -q "android.speech.RecognitionService" android/app/src/main/AndroidManifest.xml
           ! grep -q "رمز الاسترداد" lib/main.dart
           ! grep -q "backup_recovery_code" lib/main.dart
+
       - name: Analyze code
         run: flutter analyze --no-fatal-warnings --no-fatal-infos
+
       - name: Build release APK
-        run: flutter build apk --release
+        env:
+          DAINPAY_STORE_PASSWORD: ${{ secrets.DAINPAY_STORE_PASSWORD }}
+          DAINPAY_KEY_PASSWORD: ${{ secrets.DAINPAY_KEY_PASSWORD }}
+          DAINPAY_KEY_ALIAS: ${{ secrets.DAINPAY_KEY_ALIAS }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            test -n "$DAINPAY_STORE_PASSWORD" || { echo "Missing DAINPAY_STORE_PASSWORD secret"; exit 1; }
+            test -n "$DAINPAY_KEY_PASSWORD" || { echo "Missing DAINPAY_KEY_PASSWORD secret"; exit 1; }
+            test -n "$DAINPAY_KEY_ALIAS" || { echo "Missing DAINPAY_KEY_ALIAS secret"; exit 1; }
+          fi
+          flutter build apk --release
+
       - name: Record release signing certificate
         run: |
           set -euo pipefail
@@ -161,6 +256,7 @@ jobs:
           test -n "$APKSIGNER"
           "$APKSIGNER" verify --print-certs "$APK" | tee release-signing-certificate.txt
           test -s release-signing-certificate.txt
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:

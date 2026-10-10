@@ -69,12 +69,12 @@ jobs:
               import re
               text = re.sub(
                   r'(<item name="android:windowSplashScreenAnimatedIcon">).*?(</item>)',
-                  r'\\1@drawable/splash_transparent\\2',
+                  r'\1@drawable/splash_transparent\2',
                   text,
               )
               text = re.sub(
                   r'(<item name="android:windowSplashScreenBackground">).*?(</item>)',
-                  r'\\1#101719\\2',
+                  r'\1#101719\2',
                   text,
               )
               styles.write_text(text)

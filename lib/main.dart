@@ -2121,6 +2121,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
   bool listening = false;
   bool initializing = false;
   String live = '';
+  String stage = 'جاهز للتسجيل';
 
   int? amountCentsFromText(String text) {
     final normalized = _digits(text);
@@ -2204,64 +2205,101 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
   }
 
   Future<void> record() async {
-    if (initializing) return;
-
-    if (listening) {
-      try {
-        await speech.stop();
-      } catch (_) {}
-      if (mounted) setState(() => listening = false);
+    if (initializing) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('جارٍ تهيئة التسجيل، انتظر لحظة.')),
+        );
+      }
       return;
     }
 
-    initializing = true;
+    if (listening) {
+      try {
+        await speech.stop().timeout(const Duration(seconds: 4));
+      } catch (e) {
+        debugPrint('Speech stop error: $e');
+      }
+      if (mounted) {
+        setState(() {
+          listening = false;
+          stage = 'تم إيقاف التسجيل';
+        });
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        initializing = true;
+        stage = 'جارٍ فحص صلاحية الميكروفون...';
+        live = '';
+      });
+    } else {
+      initializing = true;
+    }
 
     try {
-      if (!await _ensureMicrophonePermission()) return;
-      await speech.cancel();
+      if (!await _ensureMicrophonePermission().timeout(
+        const Duration(seconds: 20),
+      )) {
+        stage = 'لم تُمنح صلاحية الميكروفون';
+        return;
+      }
+
+      if (mounted) setState(() => stage = 'جارٍ تجهيز خدمة الصوت...');
+      await speech.cancel().timeout(const Duration(seconds: 4));
+
       final available = await speech.initialize(
-        debugLogging: false,
+        debugLogging: true,
         onStatus: (status) {
+          debugPrint('Speech status: $status');
           if (!mounted) return;
-          if (status == 'notListening' || status == 'done') {
-            setState(() => listening = false);
-          }
+          setState(() {
+            if (status == 'listening') {
+              listening = true;
+              stage = 'الميكروفون يستمع الآن...';
+            } else if (status == 'notListening' || status == 'done') {
+              listening = false;
+              stage = live.isEmpty
+                  ? 'توقّف الاستماع دون نص؛ حاول مجدداً'
+                  : 'انتهى الاستماع';
+            } else {
+              stage = 'حالة خدمة الصوت: $status';
+            }
+          });
         },
         onError: (error) {
-          debugPrint('Speech error: $error');
+          debugPrint('Speech error: ${error.errorMsg}; permanent: ${error.permanent}');
           if (!mounted) return;
-          setState(() => listening = false);
+          setState(() {
+            listening = false;
+            stage = 'خطأ في خدمة الصوت: ${error.errorMsg}';
+          });
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'تعذر تشغيل التعرف الصوتي. تحقق من الميكروفون وخدمة التعرف الصوتي.',
-              ),
+            SnackBar(
+              content: Text('تعذر تشغيل التعرف الصوتي: ${error.errorMsg}'),
+              duration: const Duration(seconds: 5),
             ),
           );
         },
-      );
+      ).timeout(const Duration(seconds: 12));
 
       if (!available) {
         if (mounted) {
+          setState(() => stage = 'خدمة التعرف الصوتي غير متاحة');
           await showDialog<void>(
             context: context,
             builder: (_) => AlertDialog(
               title: const Text('التعرف الصوتي غير متاح'),
               content: const Text(
-                'لم يتمكن DainPay من تشغيل خدمة التعرف الصوتي. '
-                'تأكد من منح الميكروفون صلاحية الاستخدام وأن خدمة التعرف الصوتي في الهاتف مفعلة، ثم أعد المحاولة.',
+                'لم يستطع الهاتف تشغيل خدمة التعرف الصوتي. تأكد من تفعيل خدمة '
+                'التعرف الصوتي وتثبيت حزمة اللغة العربية في الهاتف، ثم أعد المحاولة.',
               ),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context),
                   child: const Text('إغلاق'),
-                ),
-                FilledButton(
-                  onPressed: () async {
-                    Navigator.pop(context);
-                    await openAppSettings();
-                  },
-                  child: const Text('إعدادات التطبيق'),
                 ),
               ],
             ),
@@ -2271,8 +2309,11 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       }
 
       if (!mounted) return;
+      setState(() => stage = 'جارٍ البحث عن اللغة العربية...');
 
-      final locales = await speech.locales();
+      final locales = await speech.locales().timeout(
+        const Duration(seconds: 6),
+      );
       String? arabicLocale;
       for (final locale in locales) {
         if (locale.localeId.toLowerCase() == 'ar-ly') {
@@ -2285,7 +2326,11 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           .map((locale) => locale.localeId)
           .firstOrNull;
 
-      setState(() => listening = true);
+      if (!mounted) return;
+      setState(() {
+        listening = false;
+        stage = 'جارٍ تشغيل الميكروفون...';
+      });
 
       await speech.listen(
         listenOptions: stt.SpeechListenOptions(
@@ -2294,8 +2339,12 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           cancelOnError: true,
         ),
         onResult: (result) async {
+          debugPrint('Speech result: final=${result.finalResult}, text=${result.recognizedWords}');
           if (!mounted) return;
-          setState(() => live = result.recognizedWords);
+          setState(() {
+            live = result.recognizedWords;
+            if (live.isNotEmpty) stage = 'تم التقاط الكلام';
+          });
 
           if (!result.finalResult) return;
 
@@ -2314,26 +2363,60 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
             );
             await widget.store.saveLocal();
             widget.store.safeNotify();
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('تم حفظ المسودة الصوتية')),
+              );
+            }
+          } else if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('انتهى الاستماع دون التقاط كلام واضح.')),
+            );
           }
 
-          if (mounted) setState(() => listening = false);
+          if (mounted) {
+            setState(() {
+              listening = false;
+              stage = text.isEmpty ? 'لم يتم التقاط كلام' : 'تم حفظ المسودة';
+            });
+          }
         },
-      );
-    } catch (e) {
-      debugPrint('Speech start error: $e');
+      ).timeout(const Duration(seconds: 8));
+
+      if (mounted) setState(() => stage = 'تم إرسال أمر بدء الاستماع؛ بانتظار الكلام...');
+    } on TimeoutException catch (e, stack) {
+      debugPrint('Speech timeout: $e');
+      debugPrintStack(stackTrace: stack);
       if (mounted) {
-        setState(() => listening = false);
+        setState(() {
+          listening = false;
+          stage = 'انتهت مهلة تهيئة الصوت؛ أعد المحاولة';
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-              'تعذر تشغيل التعرف الصوتي. تحقق من صلاحية الميكروفون '
-              'وخدمة التعرف الصوتي في الهاتف.',
-            ),
+            content: Text('خدمة الصوت لم تستجب في الوقت المحدد. تحقق من خدمة التعرف الصوتي في الهاتف ثم أعد المحاولة.'),
+            duration: Duration(seconds: 6),
+          ),
+        );
+      }
+    } catch (e, stack) {
+      debugPrint('Speech start error: $e');
+      debugPrintStack(stackTrace: stack);
+      if (mounted) {
+        setState(() {
+          listening = false;
+          stage = 'فشل بدء التسجيل: $e';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('فشل بدء التسجيل: $e'),
+            duration: const Duration(seconds: 6),
           ),
         );
       }
     } finally {
       initializing = false;
+      if (mounted) setState(() {});
     }
   }
 
@@ -2357,12 +2440,24 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           Card(
             child: ListTile(
               onTap: record,
-              leading: Icon(
-                listening ? Icons.stop_circle : Icons.mic_rounded,
-                color: listening ? burgundy : emerald,
+              leading: initializing
+                  ? const SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      listening ? Icons.stop_circle : Icons.mic_rounded,
+                      color: listening ? burgundy : emerald,
+                    ),
+              title: Text(
+                initializing
+                    ? 'جارٍ بدء التسجيل...'
+                    : listening
+                        ? 'جارٍ الاستماع...'
+                        : 'تسجيل عملية صوتية',
               ),
-              title: Text(listening ? 'جارٍ الاستماع...' : 'تسجيل عملية صوتية'),
-              subtitle: Text(live.isEmpty ? 'مثال: محمد 150 بضاعة' : live),
+              subtitle: Text(live.isNotEmpty ? live : stage.isNotEmpty ? stage : 'مثال: محمد 150 بضاعة'),
             ),
           ),
           if (drafts.isEmpty)

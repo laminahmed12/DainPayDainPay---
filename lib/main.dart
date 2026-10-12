@@ -559,6 +559,7 @@ class Store extends ChangeNotifier {
   bool syncing = false;
   bool activated = false;
   bool dark = false;
+  String themePreference = 'system';
   bool isAdmin = false;
   String ownerToken = '';
   String lastDeleteError = '';
@@ -585,6 +586,8 @@ class Store extends ChangeNotifier {
     store.whatsappMessage =
         store.prefs.getString('whatsappMessage') ?? store.whatsappMessage;
     store.dark = store.prefs.getBool('dark') ?? false;
+    final savedTheme = store.prefs.getString('theme_mode');
+    store.themePreference = savedTheme ?? (store.dark ? 'dark' : 'light');
     store.activated = store.prefs.getBool('activated') ?? false;
     store.deviceId = store.prefs.getString('device_id') ?? '';
     store.localBackupKey =
@@ -810,6 +813,7 @@ class Store extends ChangeNotifier {
       _pref(() => prefs.setString('shop', shop)),
       _pref(() => prefs.setString('whatsappMessage', whatsappMessage)),
       _pref(() => prefs.setBool('dark', dark)),
+      _pref(() => prefs.setString('theme_mode', themePreference)),
       _pref(() => prefs.setBool('activated', activated)),
       _pref(() => prefs.setStringList(
             'pending_deleted_customers',
@@ -932,6 +936,26 @@ class Store extends ChangeNotifier {
     return true;
   }
 
+  Future<bool> updateCustomer(Customer updated) async {
+    final index = customers.indexWhere((item) => item.id == updated.id);
+    if (index < 0 || updated.name.trim().isEmpty) return false;
+    final normalizedName = updated.name.trim().toLowerCase();
+    final normalizedPhone = phone218(updated.phone);
+    final duplicate = customers.any((existing) {
+      if (existing.id == updated.id) return false;
+      final sameName = existing.name.trim().toLowerCase() == normalizedName;
+      final existingPhone = phone218(existing.phone);
+      final samePhone = normalizedPhone.isNotEmpty && existingPhone.isNotEmpty && normalizedPhone == existingPhone;
+      return sameName && samePhone;
+    });
+    if (duplicate) return false;
+    customers[index].name = updated.name.trim();
+    customers[index].phone = updated.phone.trim();
+    customers[index].limitCents = updated.limitCents;
+    await save();
+    return true;
+  }
+
   Future<bool> saveTx(Tx transaction) async {
     if (transaction.amountCents <= 0) return false;
     if (transaction.type != 'debt' && transaction.type != 'payment')
@@ -1001,6 +1025,7 @@ class Store extends ChangeNotifier {
       'shop': shop,
       'whatsappMessage': whatsappMessage,
       'dark': dark,
+      'themePreference': themePreference,
       'activated': activated,
       'trialStart': trialStart?.toIso8601String(),
       'customers': customers.map((e) => e.toJson()).toList(),
@@ -1452,7 +1477,11 @@ class DainPayApp extends StatelessWidget {
           title: appTitle,
           theme: _theme(Brightness.light),
           darkTheme: _theme(Brightness.dark),
-          themeMode: store.dark ? ThemeMode.dark : ThemeMode.light,
+          themeMode: switch (store.themePreference) {
+            'dark' => ThemeMode.dark,
+            'light' => ThemeMode.light,
+            _ => ThemeMode.system,
+          },
           home: Directionality(
             textDirection: TextDirection.rtl,
             child: HomePage(store: store),
@@ -2023,6 +2052,88 @@ class _AddCustomerPageState extends State<AddCustomerPage> {
   }
 }
 
+class EditCustomerPage extends StatefulWidget {
+  const EditCustomerPage({super.key, required this.store, required this.customer});
+
+  final Store store;
+  final Customer customer;
+
+  @override
+  State<EditCustomerPage> createState() => _EditCustomerPageState();
+}
+
+class _EditCustomerPageState extends State<EditCustomerPage> {
+  late final TextEditingController name;
+  late final TextEditingController phone;
+  late final TextEditingController limit;
+  bool busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    name = TextEditingController(text: widget.customer.name);
+    phone = TextEditingController(text: widget.customer.phone);
+    limit = TextEditingController(
+      text: widget.customer.limitCents == 0
+          ? ''
+          : '${widget.customer.limitCents ~/ 100}.${(widget.customer.limitCents % 100).toString().padLeft(2, '0')}',
+    );
+  }
+
+  @override
+  void dispose() {
+    name.dispose();
+    phone.dispose();
+    limit.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    if (busy) return;
+    if (name.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('أدخل اسم العميل')),
+      );
+      return;
+    }
+    setState(() => busy = true);
+    final updated = Customer(
+      id: widget.customer.id,
+      name: name.text.trim(),
+      phone: phone.text.trim(),
+      limitCents: parseCents(limit.text),
+    );
+    final ok = await widget.store.updateCustomer(updated);
+    if (!mounted) return;
+    setState(() => busy = false);
+    if (ok) {
+      Navigator.pop(context, true);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('يوجد عميل آخر بنفس الاسم ورقم الهاتف، أو تعذر حفظ التعديل.')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PageForm(
+      title: 'تعديل بيانات العميل',
+      children: [
+        TextField(controller: name, textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(labelText: 'اسم العميل')),
+        TextField(controller: phone, keyboardType: TextInputType.phone,
+          decoration: const InputDecoration(labelText: 'رقم الهاتف (اختياري)')),
+        TextField(controller: limit,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(labelText: 'السقف الائتماني اختياري')),
+        FilledButton(onPressed: busy ? null : save,
+          child: Text(busy ? 'جارٍ الحفظ...' : 'حفظ التعديلات')),
+      ],
+    );
+  }
+}
+
 class CustomerPage extends StatelessWidget {
   const CustomerPage({super.key, required this.store, required this.customer});
 
@@ -2178,6 +2289,21 @@ class CustomerPage extends StatelessWidget {
                         },
                         icon: const Icon(Icons.phone_rounded),
                         label: const Text('اتصال'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          final changed = await Navigator.push<bool>(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => EditCustomerPage(store: store, customer: customer),
+                            ),
+                          );
+                          if (changed == true && context.mounted) {
+                            Navigator.pop(context);
+                          }
+                        },
+                        icon: const Icon(Icons.edit_rounded),
+                        label: const Text('تعديل بيانات العميل'),
                       ),
                       OutlinedButton.icon(
                         onPressed: () => deleteCustomer(context),
@@ -2905,7 +3031,11 @@ class _VoiceReviewPageState extends State<VoiceReviewPage> {
               TextField(
                 controller: customerPhone,
                 keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(labelText: 'رقم الهاتف (اختياري)'),
+                decoration: const InputDecoration(
+                  labelText: 'رقم الهاتف (اختياري)',
+                  hintText: 'مثال: 0912345678',
+                  prefixIcon: Icon(Icons.phone_outlined),
+                ),
               ),
             ],
           ),
@@ -3132,14 +3262,23 @@ class _SettingsPageState extends State<SettingsPage> {
             controller: shop,
             decoration: const InputDecoration(labelText: 'اسم المحل / النشاط'),
           ),
-          SwitchListTile(
-            value: store.dark,
+          DropdownButtonFormField<String>(
+            value: store.themePreference,
+            decoration: const InputDecoration(labelText: 'مظهر التطبيق'),
+            items: const [
+              DropdownMenuItem(value: 'system', child: Text('تلقائي حسب مظهر الجهاز')),
+              DropdownMenuItem(value: 'light', child: Text('الوضع الفاتح')),
+              DropdownMenuItem(value: 'dark', child: Text('الوضع الداكن')),
+            ],
             onChanged: (value) async {
-              setState(() => store.dark = value);
+              if (value == null) return;
+              setState(() {
+                store.themePreference = value;
+                store.dark = value == 'dark';
+              });
               await store.saveLocal();
               store.safeNotify();
             },
-            title: const Text('الوضع الداكن'),
           ),
           TextField(
             controller: message,

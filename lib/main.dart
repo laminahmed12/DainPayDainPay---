@@ -2579,6 +2579,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
   final speech = stt.SpeechToText();
   bool listening = false;
   bool initializing = false;
+  bool offlineOnly = false;
   String live = '';
   String stage = 'جاهز للتسجيل';
 
@@ -2737,8 +2738,10 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           });
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('تعذر تشغيل التعرف الصوتي: ${error.errorMsg}'),
-              duration: const Duration(seconds: 5),
+              content: Text(offlineOnly
+                  ? 'تعذر التعرف دون إنترنت (${error.errorMsg}). تأكد من تنزيل حزمة التعرف على الكلام باللغة العربية في إعدادات خدمة الصوت بالهاتف.'
+                  : 'تعذر تشغيل التعرف الصوتي: ${error.errorMsg}'),
+              duration: const Duration(seconds: 7),
             ),
           );
         },
@@ -2783,6 +2786,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           localeId: arabicLocale,
           partialResults: true,
           cancelOnError: true,
+          onDevice: offlineOnly,
         ),
         onResult: (result) async {
           debugPrint('Speech result: final=${result.finalResult}, text=${result.recognizedWords}');
@@ -2885,6 +2889,19 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       body: ListView(
         padding: const EdgeInsets.all(12),
         children: [
+          Card(
+            child: SwitchListTile(
+              value: offlineOnly,
+              onChanged: listening || initializing
+                  ? null
+                  : (value) => setState(() => offlineOnly = value),
+              title: const Text('التعرف دون إنترنت'),
+              subtitle: Text(offlineOnly
+                  ? 'يعمل دون اتصال إذا كانت حزمة العربية مثبتة على الهاتف.'
+                  : 'الوضع المعتاد: يسمح باستخدام الإنترنت أو التعرف المحلي حسب خدمة الهاتف.'),
+              secondary: Icon(offlineOnly ? Icons.wifi_off : Icons.language),
+            ),
+          ),
           Card(
             child: ListTile(
               onTap: record,

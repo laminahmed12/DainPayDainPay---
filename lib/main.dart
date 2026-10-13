@@ -2712,7 +2712,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       stage = 'محاولة التعرف على الكلام بالعربية دون إنترنت...';
     });
     await speech.listen(
-      listenOptions: const stt.SpeechListenOptions(
+      listenOptions: stt.SpeechListenOptions(
         localeId: 'ar-SA',
         partialResults: true,
         cancelOnError: true,

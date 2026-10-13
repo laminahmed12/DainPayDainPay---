@@ -2663,6 +2663,69 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     return false;
   }
 
+  bool _onlineFallbackUsed = false;
+
+  Future<void> _handleSpeechResult(dynamic result) async {
+    debugPrint('Speech result: final=${result.finalResult}, text=${result.recognizedWords}');
+    if (!mounted) return;
+    setState(() {
+      live = result.recognizedWords;
+      if (live.isNotEmpty) stage = 'تم التقاط الكلام';
+    });
+    if (!result.finalResult) return;
+
+    final recognizedText = result.recognizedWords.trim();
+    if (recognizedText.isNotEmpty) {
+      widget.store.voiceDrafts.insert(
+        0,
+        VoiceDraft(
+          id: makeId(),
+          text: recognizedText,
+          date: DateTime.now(),
+          customerId: findCustomer(recognizedText),
+          amountCents: amountCentsFromText(recognizedText) ?? 0,
+          note: recognizedText,
+        ),
+      );
+      await widget.store.saveLocal();
+      widget.store.safeNotify();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم حفظ المسودة الصوتية')),
+        );
+      }
+    } else if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('انتهى الاستماع دون التقاط كلام واضح.')),
+      );
+    }
+    if (mounted) {
+      setState(() {
+        listening = false;
+        stage = recognizedText.isEmpty ? 'لم يتم التقاط كلام' : 'تم حفظ المسودة';
+      });
+    }
+  }
+
+  Future<void> _startRecognition({required bool onDevice}) async {
+    if (!mounted) return;
+    setState(() {
+      listening = false;
+      stage = onDevice
+          ? 'محاولة التعرف الصوتي دون إنترنت...'
+          : 'التعرف الصوتي عبر خدمة الهاتف (قد يحتاج إنترنت)...';
+    });
+    await speech.listen(
+      listenOptions: stt.SpeechListenOptions(
+        localeId: 'ar-SA',
+        partialResults: true,
+        cancelOnError: true,
+        onDevice: onDevice,
+      ),
+      onResult: _handleSpeechResult,
+    );
+  }
+
   Future<void> record() async {
     if (initializing) {
       if (mounted) {
@@ -2697,6 +2760,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     } else {
       initializing = true;
     }
+    _onlineFallbackUsed = false;
 
     try {
       if (!await _ensureMicrophonePermission().timeout(
@@ -2717,12 +2781,18 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           setState(() {
             if (status == 'listening') {
               listening = true;
-              stage = 'الميكروفون يستمع الآن...';
+              stage = _onlineFallbackUsed
+                  ? 'الميكروفون يستمع عبر خدمة الهاتف...'
+                  : 'الميكروفون يستمع؛ نجرب التعرف المحلي أولاً...';
             } else if (status == 'notListening' || status == 'done') {
               listening = false;
-              stage = live.isEmpty
-                  ? 'توقّف الاستماع دون نص؛ حاول مجدداً'
-                  : 'انتهى الاستماع';
+              if (live.isNotEmpty) {
+                stage = 'انتهى الاستماع';
+              } else if (!_onlineFallbackUsed) {
+                stage = 'توقف التعرف المحلي؛ ستتم محاولة الخدمة المعتادة';
+              } else {
+                stage = 'توقف الاستماع دون نص؛ حاول مجدداً';
+              }
             } else {
               stage = 'حالة خدمة الصوت: $status';
             }
@@ -2730,6 +2800,36 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         },
         onError: (error) {
           debugPrint('Speech error: ${error.errorMsg}; permanent: ${error.permanent}');
+          if (!_onlineFallbackUsed) {
+            _onlineFallbackUsed = true;
+            if (mounted) {
+              setState(() {
+                listening = false;
+                stage = 'التعرف المحلي غير متاح؛ جارٍ تجربة خدمة الهاتف...';
+              });
+            }
+            Future<void>(() async {
+              try {
+                await speech.cancel().timeout(const Duration(seconds: 4));
+                await _startRecognition(onDevice: false);
+              } catch (fallbackError) {
+                debugPrint('Online speech fallback error: $fallbackError');
+                if (mounted) {
+                  setState(() {
+                    listening = false;
+                    stage = 'تعذر التعرف الصوتي محلياً وعبر خدمة الهاتف';
+                  });
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('تعذر تحويل الكلام إلى نص. تحقق من اتصال الإنترنت أو ثبّت حزمة التعرف العربية دون إنترنت في إعدادات الهاتف.'),
+                      duration: Duration(seconds: 7),
+                    ),
+                  );
+                }
+              }
+            });
+            return;
+          }
           if (!mounted) return;
           setState(() {
             listening = false;
@@ -2752,8 +2852,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
             builder: (_) => AlertDialog(
               title: const Text('التعرف الصوتي غير متاح'),
               content: const Text(
-                'لم يستطع الهاتف تشغيل خدمة التعرف الصوتي. تأكد من تفعيل خدمة '
-                'التعرف الصوتي وتثبيت حزمة اللغة العربية في الهاتف، ثم أعد المحاولة.',
+                'لم يستطع الهاتف تشغيل خدمة التعرف الصوتي. فعّل خدمة التعرف الصوتي وثبّت حزمة اللغة العربية. يعمل دون إنترنت فقط إذا كانت الخدمة وحزمة العربية تدعمان التعرف المحلي.',
               ),
               actions: [
                 TextButton(
@@ -2767,68 +2866,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         return;
       }
 
-      if (!mounted) return;
-
-      // Avoid speech.locales(): on some Android speech services this native
-      // query hangs even though Google voice typing works in the keyboard.
-      // Use a widely supported Arabic locale directly to keep startup reliable.
-      const arabicLocale = 'ar-SA';
-      setState(() {
-        listening = false;
-        stage = 'جارٍ تشغيل التعرف الصوتي بالعربية...';
-      });
-
-      await speech.listen(
-        listenOptions: stt.SpeechListenOptions(
-          localeId: arabicLocale,
-          partialResults: true,
-          cancelOnError: true,
-        ),
-        onResult: (result) async {
-          debugPrint('Speech result: final=${result.finalResult}, text=${result.recognizedWords}');
-          if (!mounted) return;
-          setState(() {
-            live = result.recognizedWords;
-            if (live.isNotEmpty) stage = 'تم التقاط الكلام';
-          });
-
-          if (!result.finalResult) return;
-
-          final text = result.recognizedWords.trim();
-          if (text.isNotEmpty) {
-            widget.store.voiceDrafts.insert(
-              0,
-              VoiceDraft(
-                id: makeId(),
-                text: text,
-                date: DateTime.now(),
-                customerId: findCustomer(text),
-                amountCents: amountCentsFromText(text) ?? 0,
-                note: text,
-              ),
-            );
-            await widget.store.saveLocal();
-            widget.store.safeNotify();
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('تم حفظ المسودة الصوتية')),
-              );
-            }
-          } else if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('انتهى الاستماع دون التقاط كلام واضح.')),
-            );
-          }
-
-          if (mounted) {
-            setState(() {
-              listening = false;
-              stage = text.isEmpty ? 'لم يتم التقاط كلام' : 'تم حفظ المسودة';
-            });
-          }
-        },
-      ).timeout(const Duration(seconds: 8));
-
+      await _startRecognition(onDevice: true);
       if (mounted && !listening) {
         setState(() => stage = 'تم إرسال أمر بدء الاستماع؛ بانتظار الكلام...');
       }
@@ -2842,7 +2880,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('خدمة الصوت لم تستجب في الوقت المحدد. تحقق من خدمة التعرف الصوتي في الهاتف ثم أعد المحاولة.'),
+            content: Text('خدمة الصوت لم تستجب. تحقق من خدمة التعرف الصوتي وحزمة اللغة العربية في الهاتف ثم أعد المحاولة.'),
             duration: Duration(seconds: 6),
           ),
         );

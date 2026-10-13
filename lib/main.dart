@@ -2663,8 +2663,6 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     return false;
   }
 
-  bool _onlineFallbackUsed = false;
-
   Future<void> _handleSpeechResult(dynamic result) async {
     debugPrint('Speech result: final=${result.finalResult}, text=${result.recognizedWords}');
     if (!mounted) return;
@@ -2707,20 +2705,18 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
     }
   }
 
-  Future<void> _startRecognition({required bool onDevice}) async {
+  Future<void> _startOfflineRecognition() async {
     if (!mounted) return;
     setState(() {
       listening = false;
-      stage = onDevice
-          ? 'محاولة التعرف الصوتي دون إنترنت...'
-          : 'التعرف الصوتي عبر خدمة الهاتف (قد يحتاج إنترنت)...';
+      stage = 'محاولة التعرف على الكلام بالعربية دون إنترنت...';
     });
     await speech.listen(
-      listenOptions: stt.SpeechListenOptions(
+      listenOptions: const stt.SpeechListenOptions(
         localeId: 'ar-SA',
         partialResults: true,
         cancelOnError: true,
-        onDevice: onDevice,
+        onDevice: true,
       ),
       onResult: _handleSpeechResult,
     );
@@ -2761,7 +2757,6 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
       initializing = true;
     }
 
-    _onlineFallbackUsed = false;
     try {
       if (!await _ensureMicrophonePermission().timeout(
         const Duration(seconds: 20),
@@ -2781,17 +2776,13 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
           setState(() {
             if (status == 'listening') {
               listening = true;
-              stage = _onlineFallbackUsed
-                  ? 'الميكروفون يستمع عبر خدمة الهاتف...'
-                  : 'الميكروفون يستمع؛ نجرب التعرف المحلي أولاً...';
+              stage = 'الميكروفون يستمع؛ التعرف محلي دون إنترنت...';
             } else if (status == 'notListening' || status == 'done') {
               listening = false;
               if (live.isNotEmpty) {
                 stage = 'انتهى الاستماع';
-              } else if (!_onlineFallbackUsed) {
-                stage = 'توقف التعرف المحلي؛ ستتم محاولة الخدمة المعتادة';
               } else {
-                stage = 'توقف الاستماع دون نص؛ حاول مجدداً';
+                stage = 'توقف الاستماع دون نص؛ تحقق من حزمة العربية دون إنترنت';
               }
             } else {
               stage = 'حالة خدمة الصوت: $status';
@@ -2800,45 +2791,15 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         },
         onError: (error) {
           debugPrint('Speech error: ${error.errorMsg}; permanent: ${error.permanent}');
-          if (!_onlineFallbackUsed) {
-            _onlineFallbackUsed = true;
-            if (mounted) {
-              setState(() {
-                listening = false;
-                stage = 'التعرف المحلي غير متاح؛ جارٍ تجربة خدمة الهاتف...';
-              });
-            }
-            Future<void>(() async {
-              try {
-                await speech.cancel().timeout(const Duration(seconds: 4));
-                await _startRecognition(onDevice: false);
-              } catch (fallbackError) {
-                debugPrint('Online speech fallback error: $fallbackError');
-                if (mounted) {
-                  setState(() {
-                    listening = false;
-                    stage = 'تعذر التعرف الصوتي محلياً وعبر خدمة الهاتف';
-                  });
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('تعذر تحويل الكلام إلى نص. تحقق من اتصال الإنترنت أو ثبّت حزمة التعرف العربية دون إنترنت في إعدادات الهاتف.'),
-                      duration: Duration(seconds: 7),
-                    ),
-                  );
-                }
-              }
-            });
-            return;
-          }
           if (!mounted) return;
           setState(() {
             listening = false;
-            stage = 'خطأ في خدمة الصوت: ${error.errorMsg}';
+            stage = 'التعرف دون إنترنت غير متاح: ${error.errorMsg}';
           });
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('تعذر تشغيل التعرف الصوتي: ${error.errorMsg}'),
-              duration: const Duration(seconds: 5),
+            const SnackBar(
+              content: Text('لم يتمكن الهاتف من التعرف على العربية دون إنترنت. نزّل حزمة اللغة العربية للتعرف الصوتي دون اتصال من إعدادات خدمة الصوت في الهاتف، ثم أعد المحاولة.'),
+              duration: Duration(seconds: 8),
             ),
           );
         },
@@ -2868,7 +2829,7 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
 
       if (!mounted) return;
 
-      await _startRecognition(onDevice: true);
+      await _startOfflineRecognition();
 
       if (mounted && !listening) {
         setState(() => stage = 'تم إرسال أمر بدء الاستماع؛ بانتظار الكلام...');

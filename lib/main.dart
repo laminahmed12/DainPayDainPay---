@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:whisper_cpp_flutter_plus/whisper_cpp_flutter_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 
@@ -2576,11 +2577,118 @@ class VoiceDraftsPage extends StatefulWidget {
 }
 
 class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
-  final speech = stt.SpeechToText();
+  final models = WhisperModelManager();
+  WhisperEngine? engine;
+  dynamic microphoneTask;
+  StreamSubscription<dynamic>? updatesSubscription;
   bool listening = false;
   bool initializing = false;
+  bool modelDownloading = false;
+  double modelProgress = 0;
+  bool modelReady = false;
   String live = '';
-  String stage = 'جاهز للتسجيل';
+  String stage = 'يلزم تنزيل نموذج العربية للعمل دون إنترنت';
+
+  static const String modelFileName = 'ggml-tiny.bin';
+  static final Uri modelUri = Uri.parse(
+    'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin',
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadInstalledModel());
+  }
+
+  Future<void> _loadInstalledModel() async {
+    try {
+      final cached = await models.find(modelFileName);
+      if (cached == null) {
+        if (mounted) setState(() => stage = 'نزّل نموذج العربية مرة واحدة لاستخدامه دون إنترنت');
+        return;
+      }
+      final loaded = await WhisperEngine.load(cached.path);
+      if (!mounted) {
+        loaded.dispose();
+        return;
+      }
+      engine = loaded;
+      setState(() {
+        modelReady = true;
+        stage = 'النموذج المحلي جاهز؛ يمكنك العمل دون إنترنت';
+      });
+    } catch (e, stack) {
+      debugPrint('Whisper model load error: $e');
+      debugPrintStack(stackTrace: stack);
+      if (mounted) setState(() => stage = 'تعذر تحميل النموذج المحلي: $e');
+    }
+  }
+
+  Future<void> _downloadModel() async {
+    if (modelDownloading || initializing || listening) return;
+    setState(() {
+      modelDownloading = true;
+      modelProgress = 0;
+      stage = 'جارٍ تنزيل نموذج التعرف الصوتي (يتطلب الإنترنت أول مرة)...';
+    });
+    try {
+      await for (final progress in models.download(modelUri, modelFileName)) {
+        if (!mounted) return;
+        setState(() => modelProgress = progress.fraction.clamp(0.0, 1.0));
+      }
+      final cached = await models.find(modelFileName);
+      if (cached == null) throw StateError('اكتمل التنزيل دون العثور على ملف النموذج.');
+      final loaded = await WhisperEngine.load(cached.path);
+      if (!mounted) {
+        loaded.dispose();
+        return;
+      }
+      engine?.dispose();
+      engine = loaded;
+      setState(() {
+        modelReady = true;
+        modelProgress = 1;
+        stage = 'تم تجهيز النموذج؛ التعرف يعمل محليًا دون إنترنت';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تم تنزيل نموذج الصوت وتجهيزه. يمكنك الآن العمل دون إنترنت.')),
+      );
+    } catch (e, stack) {
+      debugPrint('Whisper model download error: $e');
+      debugPrintStack(stackTrace: stack);
+      if (mounted) {
+        setState(() => stage = 'فشل تنزيل النموذج: تحقق من الإنترنت ثم أعد المحاولة');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('تعذر تجهيز نموذج الصوت: $e'), duration: const Duration(seconds: 7)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => modelDownloading = false);
+    }
+  }
+
+  Future<void> _saveRecognizedDraft(String text) async {
+    final recognizedText = text.trim();
+    if (recognizedText.isEmpty) return;
+    widget.store.voiceDrafts.insert(
+      0,
+      VoiceDraft(
+        id: makeId(),
+        text: recognizedText,
+        date: DateTime.now(),
+        customerId: findCustomer(recognizedText),
+        amountCents: amountCentsFromText(recognizedText) ?? 0,
+        note: recognizedText,
+      ),
+    );
+    await widget.store.saveLocal();
+    widget.store.safeNotify();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تم حفظ المسودة الصوتية محليًا')),
+      );
+    }
+  }
 
   int? amountCentsFromText(String text) {
     final normalized = _digits(text);
@@ -2723,158 +2831,101 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
   }
 
   Future<void> record() async {
-    if (initializing) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('جارٍ تهيئة التسجيل، انتظر لحظة.')),
-        );
-      }
-      return;
-    }
-
+    if (initializing) return;
     if (listening) {
       try {
-        await speech.stop().timeout(const Duration(seconds: 4));
-      } catch (e) {
-        debugPrint('Speech stop error: $e');
-      }
-      if (mounted) {
-        setState(() {
+        final task = microphoneTask;
+        if (task != null) {
+          final complete = await task.stop();
+          await updatesSubscription?.cancel();
+          updatesSubscription = null;
+          microphoneTask = null;
+          final text = (complete.confirmedText as String? ?? live).trim();
+          if (text.isNotEmpty) await _saveRecognizedDraft(text);
+        }
+      } catch (e, stack) {
+        debugPrint('Whisper stop error: $e');
+        debugPrintStack(stackTrace: stack);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('تعذر إنهاء التعرف الصوتي: $e')),
+          );
+        }
+      } finally {
+        if (mounted) setState(() {
           listening = false;
-          stage = 'تم إيقاف التسجيل';
+          initializing = false;
+          stage = live.isEmpty ? 'لم يتم التقاط كلام؛ حاول مجددًا' : 'تم إنهاء المسودة الصوتية';
         });
       }
       return;
     }
 
-    if (mounted) {
-      setState(() {
-        initializing = true;
-        stage = 'جارٍ فحص صلاحية الميكروفون...';
-        live = '';
-      });
-    } else {
-      initializing = true;
+    if (!modelReady || engine == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('نزّل نموذج التعرف الصوتي أولًا، ثم يمكنك استخدامه دون إنترنت.')),
+        );
+      }
+      return;
     }
 
+    setState(() {
+      initializing = true;
+      live = '';
+      stage = 'جارٍ تشغيل التعرف المحلي بالعربية...';
+    });
     try {
-      if (!await _ensureMicrophonePermission().timeout(
-        const Duration(seconds: 20),
-      )) {
-        stage = 'لم تُمنح صلاحية الميكروفون';
-        return;
-      }
-
-      if (mounted) setState(() => stage = 'جارٍ تجهيز خدمة الصوت...');
-      await speech.cancel().timeout(const Duration(seconds: 4));
-
-      final available = await speech.initialize(
-        debugLogging: true,
-        onStatus: (status) {
-          debugPrint('Speech status: $status');
-          if (!mounted) return;
-          setState(() {
-            if (status == 'listening') {
-              listening = true;
-              stage = 'الميكروفون يستمع؛ التعرف محلي دون إنترنت...';
-            } else if (status == 'notListening' || status == 'done') {
-              listening = false;
-              if (live.isNotEmpty) {
-                stage = 'انتهى الاستماع';
-              } else {
-                stage = 'توقف الاستماع دون نص؛ تحقق من حزمة العربية دون إنترنت';
-              }
-            } else {
-              stage = 'حالة خدمة الصوت: $status';
-            }
-          });
-        },
-        onError: (error) {
-          debugPrint('Speech error: ${error.errorMsg}; permanent: ${error.permanent}');
-          if (!mounted) return;
-          setState(() {
-            listening = false;
-            stage = 'التعرف دون إنترنت غير متاح: ${error.errorMsg}';
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('لم يتمكن الهاتف من التعرف على العربية دون إنترنت. نزّل حزمة اللغة العربية للتعرف الصوتي دون اتصال من إعدادات خدمة الصوت في الهاتف، ثم أعد المحاولة.'),
-              duration: Duration(seconds: 8),
-            ),
-          );
-        },
-      ).timeout(const Duration(seconds: 12));
-
-      if (!available) {
-        if (mounted) {
-          setState(() => stage = 'خدمة التعرف الصوتي غير متاحة');
-          await showDialog<void>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text('التعرف الصوتي غير متاح'),
-              content: const Text(
-                'لم يستطع الهاتف تشغيل خدمة التعرف الصوتي. فعّل خدمة التعرف الصوتي وثبّت حزمة اللغة العربية. يعمل دون إنترنت فقط إذا كانت الخدمة وحزمة العربية تدعمان التعرف المحلي.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('إغلاق'),
-                ),
-              ],
-            ),
-          );
-        }
-        return;
-      }
-
-      if (!mounted) return;
-
-      await _startOfflineRecognition();
-
-      if (mounted && !listening) {
-        setState(() => stage = 'تم إرسال أمر بدء الاستماع؛ بانتظار الكلام...');
-      }
-    } on TimeoutException catch (e, stack) {
-      debugPrint('Speech timeout: $e');
-      debugPrintStack(stackTrace: stack);
-      if (mounted) {
+      final task = await engine!.transcribeMicrophone(
+        options: const TranscribeOptions(language: 'ar'),
+      );
+      microphoneTask = task;
+      updatesSubscription = task.updates.listen((update) {
+        if (!mounted) return;
+        final value = (update.text as String? ?? '').trim();
         setState(() {
-          listening = false;
-          stage = 'انتهت مهلة تهيئة الصوت؛ أعد المحاولة';
+          if (value.isNotEmpty) live = value;
+          listening = true;
+          initializing = false;
+          stage = value.isEmpty ? 'يستمع ويحوّل العربية محليًا...' : 'النص الجاري: $value';
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('خدمة الصوت لم تستجب في الوقت المحدد. تحقق من خدمة التعرف الصوتي في الهاتف ثم أعد المحاولة.'),
-            duration: Duration(seconds: 6),
-          ),
-        );
-      }
+      }, onError: (Object error, StackTrace stack) {
+        debugPrint('Whisper stream error: $error');
+        if (mounted) setState(() {
+          listening = false;
+          initializing = false;
+          stage = 'حدث خطأ أثناء التعرف المحلي: $error';
+        });
+      });
+      if (mounted) setState(() {
+        listening = true;
+        initializing = false;
+        stage = 'الميكروفون يعمل؛ قل الجملة ثم اضغط للإيقاف والحفظ';
+      });
     } catch (e, stack) {
-      debugPrint('Speech start error: $e');
+      debugPrint('Whisper start error: $e');
       debugPrintStack(stackTrace: stack);
       if (mounted) {
         setState(() {
           listening = false;
-          stage = 'فشل بدء التسجيل: $e';
+          initializing = false;
+          stage = 'تعذر تشغيل الميكروفون المحلي: $e';
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('فشل بدء التسجيل: $e'),
-            duration: const Duration(seconds: 6),
-          ),
+          SnackBar(content: Text('تعذر بدء التعرف الصوتي المحلي: $e'), duration: const Duration(seconds: 7)),
         );
       }
-    } finally {
-      initializing = false;
-      if (mounted) setState(() {});
     }
   }
 
   @override
   void dispose() {
+    unawaited(updatesSubscription?.cancel());
     try {
-      speech.stop();
+      microphoneTask?.cancel();
     } catch (_) {}
+    engine?.dispose();
+    unawaited(models.close());
     super.dispose();
   }
 
@@ -2889,7 +2940,27 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
         children: [
           Card(
             child: ListTile(
-              onTap: record,
+              leading: Icon(modelReady ? Icons.offline_pin : Icons.download_for_offline),
+              title: Text(modelReady ? 'نموذج العربية جاهز دون إنترنت' : 'تجهيز التعرف الصوتي دون إنترنت'),
+              subtitle: Text(modelReady
+                  ? 'تم تنزيل النموذج على الهاتف؛ لا يحتاج الإنترنت للتعرف.'
+                  : modelDownloading
+                      ? 'جارٍ التنزيل: ${(modelProgress * 100).toStringAsFixed(0)}%'
+                      : 'التنزيل الأول يحتاج إنترنت ومساحة تخزين كافية.'),
+              trailing: modelReady
+                  ? const Icon(Icons.check_circle, color: emerald)
+                  : IconButton(
+                      onPressed: modelDownloading ? null : _downloadModel,
+                      icon: modelDownloading
+                          ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.download),
+                    ),
+            ),
+          ),
+          if (modelDownloading) LinearProgressIndicator(value: modelProgress),
+          Card(
+            child: ListTile(
+              onTap: modelReady && !modelDownloading ? record : null,
               leading: initializing
                   ? const SizedBox(
                       width: 24,
@@ -2902,10 +2973,10 @@ class _VoiceDraftsPageState extends State<VoiceDraftsPage> {
                     ),
               title: Text(
                 initializing
-                    ? 'جارٍ بدء التسجيل...'
+                    ? 'جارٍ بدء التعرف المحلي...'
                     : listening
-                        ? 'جارٍ الاستماع...'
-                        : 'تسجيل عملية صوتية',
+                        ? 'جارٍ الاستماع بالعربية دون إنترنت...'
+                        : 'بدء تحويل الكلام إلى نص',
               ),
               subtitle: Text(live.isNotEmpty ? live : stage.isNotEmpty ? stage : 'مثال: محمد 150 بضاعة'),
             ),
